@@ -1,0 +1,62 @@
+# Base config. Values mirror docs/training.md "Training Defaults" (base column).
+# smoke.yaml / full.yaml inherit from this file and override.
+
+seed: 0
+device: cpu
+
+world:
+  grid_size: 64
+  day_length: 1000          # ticks per day/night cycle
+  night_start_frac: 0.5     # fraction of the day after which it is night
+  window: 11                # egocentric observation window (odd)
+  terrain:
+    num_types: 3
+    move_cost: [1.0, 2.0, 4.0]   # energy multiplier per terrain type
+    frequencies: [0.7, 0.2, 0.1]
+  energy:
+    init: 1.0
+    max: 1.0
+    move_cost: 0.002        # per move, scaled by terrain move_cost
+    base_drain: 0.0005      # per tick, always
+    night_drain: 0.002      # extra per tick at night when not on a shelter tile
+    eat_gain: 0.25
+  fatigue:
+    init: 0.0
+    max: 1.0
+    move_gain: 0.001
+    rest_recovery: 0.02
+  food:
+    num_patches: 40
+    regrow_interval_range: [200, 800]   # per-patch, sampled once at world gen
+  water:
+    num_tiles: 30
+  shelter:
+    num_tiles: 12
+  levers: null              # experiment levers off by default; see world/levers.py
+
+model:
+  core: gru                 # gru | rssm
+  core_hidden: 256
+  obs_embed_dim: 128
+  encoder_channels: [16, 32]
+
+ppo:
+  total_env_steps: 5000000
+  num_envs: 8
+  rollout_length: 256
+  lr: 3.0e-4
+  anneal_lr: true
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  update_epochs: 4
+  num_minibatches: 8
+  entropy_coef: 0.01
+  value_coef: 0.5
+  max_grad_norm: 0.5
+
+run:
+  checkpoint_every: 100000
+  keep_last: 5
+  log_every: 1000
+  run_dir: runs

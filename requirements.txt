@@ -1,0 +1,9 @@
+numpy>=1.26
+pyyaml>=6.0
+torch>=2.2
+tensorboard>=2.16
+psutil>=5.9
+pytest>=8.0
+# viz extras (only needed for viz/ tools, imported lazily)
+streamlit>=1.35
+matplotlib>=3.8

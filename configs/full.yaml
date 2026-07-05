@@ -1,0 +1,18 @@
+# Full config: long experiment run.
+# Values mirror docs/training.md "Training Defaults" (full column).
+
+inherits: base.yaml
+
+model:
+  core_hidden: 512
+  obs_embed_dim: 256
+  encoder_channels: [32, 64]
+
+ppo:
+  total_env_steps: 50000000
+  num_envs: 16
+  gamma: 0.997
+
+run:
+  checkpoint_every: 250000
+  keep_last: 10

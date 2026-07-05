@@ -1,0 +1,22 @@
+# Smoke config: tiny run that must finish < 3 min on CPU.
+# Values mirror docs/training.md "Training Defaults" (smoke column).
+
+inherits: base.yaml
+
+model:
+  core_hidden: 64
+  obs_embed_dim: 32
+  encoder_channels: [8, 16]
+
+ppo:
+  total_env_steps: 20000
+  num_envs: 2
+  rollout_length: 64
+  anneal_lr: false
+  update_epochs: 2
+  num_minibatches: 2
+
+run:
+  checkpoint_every: 10000
+  keep_last: 2
+  log_every: 500
