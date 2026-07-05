@@ -114,6 +114,27 @@ def test_capability_shift_is_reversible() -> None:
             assert success is True
 
 
+def test_capability_shift_effect_delta_swap() -> None:
+    """Two shift entries with swapped effect_delta implement an NS effect-swap:
+    pressing MOVE_N actually moves south (and vice versa) while active, and
+    reverts to the normal delta once the window ends (reversible, like
+    fail_prob/energy_mult)."""
+    shift = {
+        "capability_shift": [
+            {"action": engine.MOVE_N, "start": 10, "end": 20, "effect_delta": [0, 1]},
+            {"action": engine.MOVE_S, "start": 10, "end": 20, "effect_delta": [0, -1]},
+        ]
+    }
+    w = World(cfg_with_levers(shift))
+    for _ in range(30):
+        tick = w.tick
+        w.set_agent_pos(0, 32, 32)
+        _, infos = w.step([engine.MOVE_N])
+        dpos = infos[0]["realized"]["dpos"]
+        expected = (0, 1) if 10 <= tick < 20 else (0, -1)
+        assert dpos == expected, f"tick {tick}: dpos {dpos} != expected {expected}"
+
+
 def test_ghost_labels_in_event_log_not_in_observations() -> None:
     levers = {"ghost_events": {"rate": 0.5, "kinds": ["push", "consume_food"]}}
     w = World(cfg_with_levers(levers))

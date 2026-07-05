@@ -99,11 +99,14 @@ class PPOModel(nn.Module):
 
     ``cfg["agent"]`` has no separate embedding-width key: the observation
     embedding and the GRU input share one width, ``agent.hidden_size``, by
-    convention (see agent/encoder.py). The policy/value heads take the core
-    output PLUS the body model's detached per-action success/denergy
-    predictions (see ledger.body_model.build_policy_features), hence the
-    ``+ 2 * NUM_ACTIONS`` — the body model itself lives outside this module
-    (PPOTrainer.body_model), trained by its own optimizer.
+    convention (see agent/encoder.py). Unless ``agent.use_ledger_features`` is
+    set false, the policy/value heads take the core output PLUS the body
+    model's detached per-action success/denergy predictions (see
+    ledger.body_model.build_policy_features), hence the ``+ 2 * NUM_ACTIONS``
+    — the body model itself lives outside this module (PPOTrainer.body_model),
+    trained by its own optimizer, and always trains regardless of this flag
+    (see build_policy_features's docstring: this is the capability-shift
+    battery's architecture-A/B toggle, experiments/batteries/capability_shift.py).
     """
 
     def __init__(
@@ -112,9 +115,11 @@ class PPOModel(nn.Module):
         super().__init__()
         acfg = cfg["agent"]
         embed_dim = acfg["hidden_size"]
+        self.use_ledger_features: bool = acfg.get("use_ledger_features", True)
         self.encoder = ObsEncoder(acfg, grid_channels, intero_dim, embed_dim, window)
         self.core = GRUCore(acfg, input_dim=embed_dim)
-        policy_input_dim = self.core.output_dim + 2 * NUM_ACTIONS
+        extra = 2 * NUM_ACTIONS if self.use_ledger_features else 0
+        policy_input_dim = self.core.output_dim + extra
         self.heads = ActorCritic(acfg, policy_input_dim, NUM_ACTIONS)
 
 
@@ -233,7 +238,9 @@ class PPOTrainer:
             grid, intero = self._obs_tensors()
             embed = self.model.encoder(grid, intero)
             out, h_new = self.model.core(embed, h_in)
-            features, body_out = build_policy_features(out, self.body_model)
+            features, body_out = build_policy_features(
+                out, self.body_model, self.model.use_ledger_features
+            )
             dist, value = self.model.heads(features)
             action = dist.sample()
 
@@ -276,7 +283,7 @@ class PPOTrainer:
         h_in = self._h * (1.0 - self._done_prev).unsqueeze(-1)
         grid, intero = self._obs_tensors()
         out, _ = self.model.core(self.model.encoder(grid, intero), h_in)
-        features, _ = build_policy_features(out, self.body_model)
+        features, _ = build_policy_features(out, self.body_model, self.model.use_ledger_features)
         _, next_value = self.model.heads(features)
         buf["next_value"] = next_value
 
@@ -348,7 +355,9 @@ class PPOTrainer:
                         self.model.core, embeds.reshape(seq, m, -1), h0, mb["done"]
                     )
                     flat_core_out = outs.reshape(seq * m, -1)
-                    features, _ = build_policy_features(flat_core_out, self.body_model)
+                    features, _ = build_policy_features(
+                        flat_core_out, self.body_model, self.model.use_ledger_features
+                    )
                     dist, value = self.model.heads(features)
                     # (seq, M) -> flat, matching outs layout
                     flat_action = mb["action"].reshape(-1)

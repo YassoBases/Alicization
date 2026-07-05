@@ -19,6 +19,7 @@ import numpy as np
 
 from training.reward import compute_reward
 from world.engine import World
+from world.levers import LeverEngine
 
 
 class VecWorld:
@@ -75,6 +76,27 @@ class VecWorld:
                 self.worlds[i] = self._make_world()
                 self.ep_steps[i] = 0
         return self.observe(), rewards, dones, infos
+
+    def inject_levers(self, levers_cfg: dict[str, Any] | None) -> None:
+        """Swap in a new lever config for every live env, effective immediately
+        (each env's own tick counter keeps running — this does not touch it),
+        and for every future env created on an episode reset.
+
+        For experiments/ (e.g. the capability-shift battery) to inject an
+        unannounced shift at a controlled point in training: since each env's
+        World is rebuilt with tick=0 on its own episode boundary (see
+        ``step``), a shift's ``start``/``end`` ticks are per-episode-relative
+        and cannot express "starting now, across all envs, regardless of
+        where each one is in its episode" — hence this separate hook, keyed by
+        the trainer's global_step rather than any world's internal tick.
+        Nothing about the agent's observation channels changes; only future
+        dynamics do (CLAUDE.md: levers are config-driven and agent-invisible).
+        """
+        self.cfg = copy.deepcopy(self.cfg)
+        self.cfg["world"]["levers"] = levers_cfg
+        for w in self.worlds:
+            w.cfg["world"]["levers"] = levers_cfg
+            w.levers = LeverEngine(levers_cfg)
 
     # ------------------------------------------------------- exact save/load
 

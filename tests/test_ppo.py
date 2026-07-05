@@ -190,3 +190,17 @@ def test_checkpoint_resume_identical_step_and_loss(tmp_path: Path) -> None:
     assert t2.global_step == t1.global_step
     assert t2.last_metrics["reward/rollout"] == pytest.approx(reward_a, abs=1e-7)
     assert t2.last_metrics["loss/total"] == pytest.approx(loss_a, abs=1e-6)
+
+
+# ------------------------------------------------ architecture-B (no ledger)
+
+
+def test_use_ledger_features_false_runs_and_shrinks_policy_input() -> None:
+    """capability_shift battery's architecture-B control: the body model still
+    trains, but the policy head's input is just the raw core output."""
+    cfg = tiny_cfg()
+    cfg["agent"]["use_ledger_features"] = False
+    t = PPOTrainer(cfg)
+    assert t.model.heads.pi.in_features == t.model.core.output_dim
+    t.train(max_updates=2)  # must not raise
+    assert "ledger/body_nll" in t.last_metrics  # body model still trained/logged

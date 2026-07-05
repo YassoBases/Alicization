@@ -109,9 +109,9 @@ def compute_body_losses(
 
 
 def build_policy_features(
-    core_out: torch.Tensor, body_model: BodyModel
+    core_out: torch.Tensor, body_model: BodyModel, use_ledger_features: bool = True
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """(B, core_dim), using ``body_model`` -> ((B, core_dim + 2*num_actions), raw body_out).
+    """(B, core_dim), using ``body_model`` -> ((B, core_dim [+ 2*num_actions]), raw body_out).
 
     Concatenates the core output — left untouched, so the policy/value loss
     trains the encoder/core through it as usual — with the body model's
@@ -122,9 +122,19 @@ def build_policy_features(
 
     The raw ``body_out`` dict (success_prob, denergy, dpos_class; all already
     detached) is also returned so callers that need the taken-action's
-    prediction (e.g. the attribution head) don't need a second forward pass.
+    prediction (e.g. the attribution head) don't need a second forward pass —
+    the body model and attribution head always run and train regardless of
+    ``use_ledger_features``.
+
+    ``use_ledger_features=False`` (see ``agent.use_ledger_features`` config)
+    is the capability-shift battery's architecture-B control: identical
+    Ledger training, but the policy/value heads never see its output, only
+    the raw core output. Used to isolate the causal effect of feeding Ledger
+    estimates into the policy (experiments/batteries/capability_shift.py).
     """
     body_out = body_model(core_out.detach())
+    if not use_ledger_features:
+        return core_out, body_out
     features = torch.cat(
         [core_out, body_out["success_prob"].detach(), body_out["denergy"].detach()],
         dim=-1,

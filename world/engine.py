@@ -269,12 +269,12 @@ class World:
             return False
         a = self.agents[agent_idx]
 
-        fail_prob, energy_mult = 0.0, 1.0
+        fail_prob, energy_mult, effect_delta = 0.0, 1.0, None
         if self.levers is not None:
-            fail_prob, energy_mult = self.levers.capability(action, self.tick)
+            fail_prob, energy_mult, effect_delta = self.levers.capability(action, self.tick)
 
         if action in _MOVE_DELTA:
-            dx, dy = _MOVE_DELTA[action]
+            dx, dy = effect_delta if effect_delta is not None else _MOVE_DELTA[action]
             nx, ny = a.x + dx, a.y + dy
             if not (0 <= nx < self.size and 0 <= ny < self.size):
                 return False  # illegal: no cost, no effect

@@ -16,6 +16,9 @@ Config schema (all keys optional)::
           end: 5000                # first tick it is inactive again (null = never)
           fail_prob: 0.5           # action attempt fails with this probability
           energy_mult: 1.0         # energy cost multiplier while active
+          effect_delta: [0, 1]     # optional: override the move (dx, dy) while
+                                   # active (e.g. two shift entries with swapped
+                                   # effect_delta implement an "effect-swap")
       ghost_events:
         rate: 0.01                 # per-tick probability of one ghost event
         kinds: [push, consume_food]
@@ -66,9 +69,15 @@ class LeverEngine:
 
     # ------------------------------------------------------------- capability
 
-    def capability(self, action: int, tick: int) -> tuple[float, float]:
-        """Effective (fail_prob, energy_mult) for ``action`` at ``tick``."""
-        fail_prob, energy_mult = 0.0, 1.0
+    def capability(
+        self, action: int, tick: int
+    ) -> tuple[float, float, tuple[int, int] | None]:
+        """Effective (fail_prob, energy_mult, effect_delta) for ``action`` at
+        ``tick``. ``effect_delta`` overrides the action's normal (dx, dy) move
+        delta while active (None: no override, i.e. the last active shift for
+        this action that specifies one wins; multiple simultaneous overrides
+        for the same action are not resolved beyond "last in list wins")."""
+        fail_prob, energy_mult, effect_delta = 0.0, 1.0, None
         for s in self.shifts:
             if s["action"] != action or tick < s["start"]:
                 continue
@@ -76,7 +85,9 @@ class LeverEngine:
                 continue
             fail_prob = max(fail_prob, float(s.get("fail_prob", 0.0)))
             energy_mult *= float(s.get("energy_mult", 1.0))
-        return fail_prob, energy_mult
+            if s.get("effect_delta") is not None:
+                effect_delta = tuple(s["effect_delta"])
+        return fail_prob, energy_mult, effect_delta
 
     # -------------------------------------------------------------- post step
 

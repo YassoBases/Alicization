@@ -130,3 +130,17 @@ def test_build_policy_features_shape() -> None:
     assert body_out["success_prob"].shape == (4, NUM_ACTIONS)
     assert body_out["denergy"].shape == (4, NUM_ACTIONS)
     assert body_out["dpos_class"].shape == (4, NUM_ACTIONS)
+
+
+def test_build_policy_features_use_ledger_features_false() -> None:
+    """Architecture-B control (capability_shift battery): body model still
+    runs (so it can still train/log), but the policy features are just the
+    raw core output — no ledger concat."""
+    torch.manual_seed(4)
+    core_dim = 10
+    body = BodyModel({"body_hidden": [8, 8]}, core_dim=core_dim, num_actions=NUM_ACTIONS)
+    core_out = torch.randn(4, core_dim)
+    features, body_out = build_policy_features(core_out, body, use_ledger_features=False)
+    assert features.shape == (4, core_dim)
+    assert torch.equal(features, core_out)
+    assert body_out["success_prob"].shape == (4, NUM_ACTIONS)  # body model still ran
