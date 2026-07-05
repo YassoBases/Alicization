@@ -41,6 +41,7 @@ world:
   levers: null
 
 agent:
+  core: gru                   # additive: gru | rssm (stage-4a drop-in switch)
   encoder_channels: [32, 64]
   hidden_size: 256           # GRU hidden / RSSM deterministic size
   gru_layers: 1
@@ -72,7 +73,7 @@ ppo:
     deficit_threshold: 0.2
     deficit_penalty: 0.01
 
-rssm:                        # Stage 4 (not yet wired into training)
+rssm:                        # stage-4a: wired into training via agent.core=rssm
   deter: 256
   stoch: 32                  # Gaussian latent
   embed: 256
@@ -85,6 +86,14 @@ rssm:                        # Stage 4 (not yet wired into training)
   replay_capacity: 500_000
   sleep_every: 5_000          # env steps between consolidation windows
   sleep_grad_steps: 200
+  # Additive knobs (not in the pasted defaults) needed by this implementation:
+  free_nats: 1.0
+  kl_balance: 0.8
+  min_std: 0.1
+  monitor:                    # participation-ratio collapse detector
+    every_ticks: 1000
+    window: 1000
+    collapse_frac: 0.25
 
 ledger:
   body_hidden: [128, 128]       # stage-3a: body model, wired into training

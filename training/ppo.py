@@ -25,6 +25,7 @@ import torch
 import torch.nn as nn
 
 from agent.core_gru import GRUCore
+from agent.core_rssm import RSSMCore
 from agent.encoder import ObsEncoder
 from agent.policy import ActorCritic
 from ledger.attribution import (
@@ -43,6 +44,7 @@ from ledger.body_model import (
 from training.attribution_eval import AttributionAccuracyTracker, ground_truth_label
 from training.checkpoints import load_checkpoint, prune_checkpoints, save_checkpoint
 from training.loggers import TBLogger
+from training.monitors import ParticipationRatioMonitor
 from training.vecenv import VecWorld
 from world.engine import NOOP, NUM_ACTIONS
 
@@ -76,7 +78,7 @@ def compute_gae(
 
 
 def replay_core(
-    core: GRUCore, embeds: torch.Tensor, h0: torch.Tensor, dones: torch.Tensor
+    core: GRUCore | RSSMCore, embeds: torch.Tensor, h0: torch.Tensor, dones: torch.Tensor
 ) -> torch.Tensor:
     """Replay a segment through the core with done masking.
 
@@ -114,10 +116,24 @@ class PPOModel(nn.Module):
     ) -> None:
         super().__init__()
         acfg = cfg["agent"]
-        embed_dim = acfg["hidden_size"]
+        self.core_kind: str = acfg.get("core", "gru")
         self.use_ledger_features: bool = acfg.get("use_ledger_features", True)
-        self.encoder = ObsEncoder(acfg, grid_channels, intero_dim, embed_dim, window)
-        self.core = GRUCore(acfg, input_dim=embed_dim)
+        if self.core_kind == "rssm":
+            # RSSM uses the canonical rssm.embed width for the observation
+            # embedding (its posterior/decoder are sized for it).
+            embed_dim = cfg["rssm"]["embed"]
+            self.encoder = ObsEncoder(acfg, grid_channels, intero_dim, embed_dim, window)
+            self.core: GRUCore | RSSMCore = RSSMCore(
+                cfg["rssm"], input_dim=embed_dim,
+                grid_shape=(grid_channels, window, window),
+                intero_dim=intero_dim, num_actions=NUM_ACTIONS,
+            )
+        elif self.core_kind == "gru":
+            embed_dim = acfg["hidden_size"]
+            self.encoder = ObsEncoder(acfg, grid_channels, intero_dim, embed_dim, window)
+            self.core = GRUCore(acfg, input_dim=embed_dim)
+        else:
+            raise ValueError(f"unknown agent.core: {self.core_kind!r} (gru|rssm)")
         extra = 2 * NUM_ACTIONS if self.use_ledger_features else 0
         policy_input_dim = self.core.output_dim + extra
         self.heads = ActorCritic(acfg, policy_input_dim, NUM_ACTIONS)
@@ -170,6 +186,20 @@ class PPOTrainer:
         self._done_prev = torch.zeros(n, device=self.device)
         self._obs = self.vec.observe()
 
+        # RSSM-only monitoring: epistemic map + participation-ratio collapse
+        # detector (training-side bookkeeping; nothing here is agent-visible).
+        self.is_rssm = isinstance(self.model.core, RSSMCore)
+        world_size = cfg["world"]["size"]
+        self.epistemic_map = np.zeros((world_size, world_size), dtype=np.float64)
+        self.epistemic_count = np.zeros((world_size, world_size), dtype=np.int64)
+        mon_cfg = cfg.get("rssm", {}).get("monitor", {}) or {}
+        self.pr_monitor = ParticipationRatioMonitor(
+            every_ticks=mon_cfg.get("every_ticks", 1000),
+            window=mon_cfg.get("window", 1000),
+            collapse_frac=mon_cfg.get("collapse_frac", 0.25),
+        )
+        self.pr_history: list[float] = []
+
         self.global_step = 0
         self._last_ckpt_step = 0
         self.reward_history: list[float] = []
@@ -214,6 +244,7 @@ class PPOTrainer:
         c, w, _ = self.vec.grid_shape
         dev = self.device
         core_dim = self.model.core.output_dim
+        self._epistemic_sum, self._aleatoric_sum, self._uncert_n = 0.0, 0.0, 0
         buf = {
             "grid": torch.zeros(rollout_len, n, c, w, w, device=dev),
             "intero": torch.zeros(rollout_len, n, self.vec.intero_dim, device=dev),
@@ -266,6 +297,22 @@ class PPOTrainer:
             action_idx = action.unsqueeze(-1)
             buf["pred_dpos_class"][t] = body_out["dpos_class"].gather(1, action_idx).squeeze(-1)
             buf["pred_denergy"][t] = body_out["denergy"].gather(1, action_idx).squeeze(-1)
+            if self.is_rssm:
+                onehot = torch.nn.functional.one_hot(action, NUM_ACTIONS).float()
+                _, epistemic, aleatoric = self.model.core.ensemble_stats(out, onehot)
+                self._epistemic_sum += epistemic.sum().item()
+                self._aleatoric_sum += aleatoric.sum().item()
+                self._uncert_n += epistemic.numel()
+                for e_val, info in zip(epistemic.cpu().tolist(), infos):
+                    x, y = info["pos"]
+                    cnt = self.epistemic_count[y, x] + 1
+                    self.epistemic_count[y, x] = cnt
+                    self.epistemic_map[y, x] += (e_val - self.epistemic_map[y, x]) / cnt
+                deter = out[:, : self.model.core.deter].cpu().numpy()
+                self.pr_monitor.add(deter)
+                pr = self.pr_monitor.maybe_compute(self.global_step + (t + 1) * n)
+                if pr is not None:
+                    self.pr_history.append(pr)
             # Ground truth: evaluation-only bookkeeping, never touches a loss.
             buf["ground_truth_label"][t] = torch.tensor(
                 [
@@ -314,7 +361,7 @@ class PPOTrainer:
             return x.reshape(n_seg, seq, *x.shape[1:])
 
         seg = {k: by_segment(buf[k]) for k in
-               ("grid", "intero", "action", "logp", "done")}
+               ("grid", "intero", "action", "logp", "done", "reward")}
         seg_adv, seg_ret, seg_val = by_segment(adv), by_segment(returns), by_segment(buf["value"])
 
         n_samples = n_seg * n  # number of BPTT sequences in this rollout
@@ -326,9 +373,11 @@ class PPOTrainer:
             if self.cfg.get("amp")
             else contextlib.nullcontext()
         )
-        metrics = {k: 0.0 for k in
-                   ("loss/policy", "loss/value", "loss/total", "entropy",
-                    "approx_kl", "clip_frac")}
+        metric_keys = ["loss/policy", "loss/value", "loss/total", "entropy",
+                       "approx_kl", "clip_frac"]
+        if self.is_rssm:
+            metric_keys += ["rssm/recon", "rssm/kl", "rssm/ensemble_nll"]
+        metrics = {k: 0.0 for k in metric_keys}
         n_mb = 0
 
         for _ in range(p["epochs"]):
@@ -385,6 +434,26 @@ class PPOTrainer:
                         + p["value_coef"] * value_loss
                         - p["entropy_coef"] * entropy
                     )
+
+                    if self.is_rssm:
+                        # World-prediction loss: the ONLY other loss allowed to
+                        # train the core (CLAUDE.md). Shares this backward pass
+                        # and optimizer with the task loss.
+                        wm = self.model.core.world_model_loss(
+                            embeds.reshape(seq, m, -1),
+                            h0,
+                            mb["done"],
+                            mb["action"],
+                            mb["grid"],
+                            mb["intero"],
+                            rewards=mb["reward"],
+                        )
+                        loss = loss + wm["total"]
+                        metrics["rssm/recon"] += (
+                            wm["recon_grid"].item() + wm["recon_intero"].item()
+                        )
+                        metrics["rssm/kl"] += wm["kl"].item()
+                        metrics["rssm/ensemble_nll"] += wm["ensemble_nll"].item()
 
                 self.opt.zero_grad()
                 loss.backward()
@@ -527,6 +596,11 @@ class PPOTrainer:
                 metrics = self.update(buf)
                 metrics.update(self.update_body_model(buf))
                 metrics.update(self.update_attribution_model(buf))
+                if self.is_rssm and self._uncert_n:
+                    metrics["rssm/epistemic"] = self._epistemic_sum / self._uncert_n
+                    metrics["rssm/aleatoric"] = self._aleatoric_sum / self._uncert_n
+                    if self.pr_history:
+                        metrics["rssm/participation_ratio"] = self.pr_history[-1]
                 elapsed = time.perf_counter() - t0
 
                 reward_rollout = buf["reward"].sum(dim=0).mean().item()
@@ -650,6 +724,10 @@ class PPOTrainer:
             "attr_accuracy_ema": self._attr_accuracy_ema.value,
             "attr_tracker_state": self.attr_tracker.state_dict(),
             "attribution_accuracy_history": list(self.attribution_accuracy_history),
+            "epistemic_map": self.epistemic_map.copy(),
+            "epistemic_count": self.epistemic_count.copy(),
+            "pr_monitor_state": self.pr_monitor.state_dict(),
+            "pr_history": list(self.pr_history),
         }
         out = save_checkpoint(
             path, self.model, self.opt, self.global_step, self.cfg, extra=extra
@@ -687,4 +765,10 @@ class PPOTrainer:
         self.attribution_accuracy_history = list(
             ckpt.extra.get("attribution_accuracy_history", [])
         )
+        if "epistemic_map" in ckpt.extra:
+            self.epistemic_map = np.asarray(ckpt.extra["epistemic_map"]).copy()
+            self.epistemic_count = np.asarray(ckpt.extra["epistemic_count"]).copy()
+        if "pr_monitor_state" in ckpt.extra:
+            self.pr_monitor.load_state_dict(ckpt.extra["pr_monitor_state"])
+            self.pr_history = list(ckpt.extra.get("pr_history", []))
         self._obs = self.vec.observe()
