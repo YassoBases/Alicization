@@ -1,4 +1,17 @@
-"""Body model: per-action capability estimates (success prob, expected costs)."""
+"""Body model: per-action capability estimates (success prob, expected costs).
+
+Trained online, one gradient step per rollout, on fresh (h, action, realized
+outcome) transitions from vecenv info dicts (see training/ppo.py's
+``update_body_model``). Its input is ``h.detach()`` — the core's GRU output,
+never gradient-connected to the encoder/core — concatenated with a one-hot
+action vector.
+
+GRADIENT ISOLATION (CLAUDE.md Hard rules): the input is always detached before
+this module sees it, and ``build_policy_features`` detaches this module's
+OUTPUT before it is used as a policy input. So no gradient from either this
+module's own loss or the policy loss ever reaches the encoder/GRU core, in
+either direction. See tests/test_grad_isolation.py.
+"""
 
 from __future__ import annotations
 
@@ -6,15 +19,116 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
+# Realized dpos -> 5-way class index. Matches world.engine's fixed move deltas
+# (MOVE_N/S/E/W); any non-move action, or a blocked/failed move, realizes
+# dpos=(0, 0) ("stay").
+DPOS_CLASSES: tuple[tuple[int, int], ...] = ((0, 0), (0, -1), (0, 1), (1, 0), (-1, 0))
+
+
+def dpos_to_class(dpos: torch.Tensor) -> torch.Tensor:
+    """(B, 2) integer dpos -> (B,) long class index into DPOS_CLASSES."""
+    out = torch.zeros(dpos.shape[0], dtype=torch.long, device=dpos.device)
+    for i, (dx, dy) in enumerate(DPOS_CLASSES):
+        out[(dpos[:, 0] == dx) & (dpos[:, 1] == dy)] = i
+    return out
 
 
 class BodyModel(nn.Module):
-    """Predicts per-action realized-transition stats from the detached core state."""
+    """MLP over [h.detach(), one_hot(action)] predicting the realized transition."""
 
     def __init__(self, cfg: dict[str, Any], core_dim: int, num_actions: int) -> None:
+        """``cfg`` is the ``ledger`` config section (body_hidden: two hidden sizes)."""
         super().__init__()
-        raise NotImplementedError
+        self.num_actions = num_actions
+        layers: list[nn.Module] = []
+        prev = core_dim + num_actions
+        for size in cfg["body_hidden"]:
+            layers += [nn.Linear(prev, size), nn.ReLU()]
+            prev = size
+        self.trunk = nn.Sequential(*layers)
+        self.dpos_head = nn.Linear(prev, len(DPOS_CLASSES))
+        self.success_head = nn.Linear(prev, 1)
+        self.denergy_head = nn.Linear(prev, 1)
+
+    def predict_action(
+        self, h_detached: torch.Tensor, action_onehot: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        """(B, core_dim), (B, num_actions) -> raw per-transition predictions:
+        {'dpos_logits': (B, 5), 'success_logit': (B,), 'denergy': (B,)}."""
+        feat = self.trunk(torch.cat([h_detached, action_onehot], dim=-1))
+        return {
+            "dpos_logits": self.dpos_head(feat),
+            "success_logit": self.success_head(feat).squeeze(-1),
+            "denergy": self.denergy_head(feat).squeeze(-1),
+        }
 
     def forward(self, h_detached: torch.Tensor) -> dict[str, torch.Tensor]:
-        """(B, core_dim) detached -> {'success_prob': (B, A), 'denergy': (B, A)}."""
-        raise NotImplementedError
+        """(B, core_dim) detached -> {'success_prob': (B, A), 'denergy': (B, A)},
+        one prediction per possible action — used to feed the policy."""
+        b, a = h_detached.shape[0], self.num_actions
+        h_rep = h_detached.unsqueeze(1).expand(b, a, -1).reshape(b * a, -1)
+        eye = torch.eye(a, device=h_detached.device).unsqueeze(0).expand(b, a, a)
+        out = self.predict_action(h_rep, eye.reshape(b * a, a))
+        return {
+            "success_prob": torch.sigmoid(out["success_logit"]).reshape(b, a),
+            "denergy": out["denergy"].reshape(b, a),
+        }
+
+
+def compute_body_losses(
+    outputs: dict[str, torch.Tensor],
+    real_dpos_class: torch.Tensor,
+    real_success: torch.Tensor,
+    real_denergy: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    """CE + BCE + MSE training losses, plus Brier/MAE diagnostic metrics.
+
+    ``outputs`` is a ``BodyModel.predict_action`` result for the action
+    actually taken in each transition.
+    """
+    ce = F.cross_entropy(outputs["dpos_logits"], real_dpos_class)
+    bce = F.binary_cross_entropy_with_logits(outputs["success_logit"], real_success)
+    mse = F.mse_loss(outputs["denergy"], real_denergy)
+    with torch.no_grad():
+        success_prob = torch.sigmoid(outputs["success_logit"])
+        success_brier = ((success_prob - real_success) ** 2).mean()
+        denergy_mae = (outputs["denergy"] - real_denergy).abs().mean()
+    return {
+        "total": ce + bce + mse,
+        "body_nll": ce,
+        "success_bce": bce,
+        "denergy_mse": mse,
+        "success_brier": success_brier,
+        "denergy_mae": denergy_mae,
+    }
+
+
+def build_policy_features(core_out: torch.Tensor, body_model: BodyModel) -> torch.Tensor:
+    """(B, core_dim), using ``body_model`` -> (B, core_dim + 2*num_actions).
+
+    Concatenates the core output — left untouched, so the policy/value loss
+    trains the encoder/core through it as usual — with the body model's
+    per-action success/denergy predictions, explicitly detached: no policy
+    gradient reaches the body model, and (belt-and-suspenders, since
+    ``BodyModel.forward`` is also given a detached input) no gradient reaches
+    the core through the body-model path either.
+    """
+    body_out = body_model(core_out.detach())
+    return torch.cat(
+        [core_out, body_out["success_prob"].detach(), body_out["denergy"].detach()],
+        dim=-1,
+    )
+
+
+class RollingMean:
+    """Exponential moving average, for smoothing noisy per-rollout scalars in TB."""
+
+    def __init__(self, decay: float = 0.98) -> None:
+        self.decay = decay
+        self.value: float | None = None
+
+    def update(self, x: float) -> float:
+        self.value = x if self.value is None else self.decay * self.value + (1 - self.decay) * x
+        return self.value

@@ -27,6 +27,13 @@ import torch.nn as nn
 from agent.core_gru import GRUCore
 from agent.encoder import ObsEncoder
 from agent.policy import ActorCritic
+from ledger.body_model import (
+    BodyModel,
+    RollingMean,
+    build_policy_features,
+    compute_body_losses,
+    dpos_to_class,
+)
 from training.checkpoints import load_checkpoint, prune_checkpoints, save_checkpoint
 from training.loggers import TBLogger
 from training.vecenv import VecWorld
@@ -85,7 +92,11 @@ class PPOModel(nn.Module):
 
     ``cfg["agent"]`` has no separate embedding-width key: the observation
     embedding and the GRU input share one width, ``agent.hidden_size``, by
-    convention (see agent/encoder.py).
+    convention (see agent/encoder.py). The policy/value heads take the core
+    output PLUS the body model's detached per-action success/denergy
+    predictions (see ledger.body_model.build_policy_features), hence the
+    ``+ 2 * NUM_ACTIONS`` — the body model itself lives outside this module
+    (PPOTrainer.body_model), trained by its own optimizer.
     """
 
     def __init__(
@@ -96,7 +107,8 @@ class PPOModel(nn.Module):
         embed_dim = acfg["hidden_size"]
         self.encoder = ObsEncoder(acfg, grid_channels, intero_dim, embed_dim, window)
         self.core = GRUCore(acfg, input_dim=embed_dim)
-        self.heads = ActorCritic(acfg, self.core.output_dim, NUM_ACTIONS)
+        policy_input_dim = self.core.output_dim + 2 * NUM_ACTIONS
+        self.heads = ActorCritic(acfg, policy_input_dim, NUM_ACTIONS)
 
 
 class PPOTrainer:
@@ -119,6 +131,17 @@ class PPOTrainer:
         window = self.vec.grid_shape[1]
         self.model = PPOModel(cfg, grid_c, self.vec.intero_dim, window).to(self.device)
         self.opt = torch.optim.Adam(self.model.parameters(), lr=self.pcfg["lr"], eps=1e-5)
+
+        lcfg = cfg["ledger"]
+        self.body_model = BodyModel(
+            lcfg, core_dim=self.model.core.output_dim, num_actions=NUM_ACTIONS
+        ).to(self.device)
+        self.body_opt = torch.optim.Adam(self.body_model.parameters(), lr=lcfg["lr"])
+        ema_decay = lcfg.get("log_ema_decay", 0.98)
+        self._body_nll_ema = RollingMean(ema_decay)
+        self._success_brier_ema = RollingMean(ema_decay)
+        self._denergy_mae_ema = RollingMean(ema_decay)
+        self.body_nll_history: list[float] = []
 
         n = self.pcfg["num_envs"]
         hidden = self.model.core.hidden_dim  # flat state size (layers * hidden_size)
@@ -151,11 +174,18 @@ class PPOTrainer:
 
     @torch.no_grad()
     def collect_rollout(self) -> dict[str, torch.Tensor]:
-        """Collect one on-policy rollout of shape (T, N, ...)."""
+        """Collect one on-policy rollout of shape (T, N, ...).
+
+        Also records, per tick, the core output (``core_out``, detached —
+        collection runs under ``torch.no_grad()`` throughout) and the realized
+        transition (dpos class, success, denergy) from the vecenv info dicts,
+        for the body model's online update (see ``update_body_model``).
+        """
         p = self.pcfg
         rollout_len, n, seq = p["rollout_steps"], p["num_envs"], p["seq_len"]
         c, w, _ = self.vec.grid_shape
         dev = self.device
+        core_dim = self.model.core.output_dim
         buf = {
             "grid": torch.zeros(rollout_len, n, c, w, w, device=dev),
             "intero": torch.zeros(rollout_len, n, self.vec.intero_dim, device=dev),
@@ -165,6 +195,10 @@ class PPOTrainer:
             "reward": torch.zeros(rollout_len, n, device=dev),
             "done": torch.zeros(rollout_len, n, device=dev),
             "h_init": torch.zeros(rollout_len // seq, n, self._h.shape[1], device=dev),
+            "core_out": torch.zeros(rollout_len, n, core_dim, device=dev),
+            "real_dpos_class": torch.zeros(rollout_len, n, dtype=torch.long, device=dev),
+            "real_success": torch.zeros(rollout_len, n, device=dev),
+            "real_denergy": torch.zeros(rollout_len, n, device=dev),
         }
         for t in range(rollout_len):
             h_in = self._h * (1.0 - self._done_prev).unsqueeze(-1)
@@ -173,10 +207,11 @@ class PPOTrainer:
             grid, intero = self._obs_tensors()
             embed = self.model.encoder(grid, intero)
             out, h_new = self.model.core(embed, h_in)
-            dist, value = self.model.heads(out)
+            features = build_policy_features(out, self.body_model)
+            dist, value = self.model.heads(features)
             action = dist.sample()
 
-            obs, rewards, dones, _ = self.vec.step(action.cpu().numpy())
+            obs, rewards, dones, infos = self.vec.step(action.cpu().numpy())
             buf["grid"][t] = grid
             buf["intero"][t] = intero
             buf["action"][t] = action
@@ -184,6 +219,17 @@ class PPOTrainer:
             buf["value"][t] = value
             buf["reward"][t] = torch.from_numpy(rewards).to(dev)
             buf["done"][t] = torch.from_numpy(dones).to(dev)
+            buf["core_out"][t] = out
+            dpos = torch.tensor(
+                [info["realized"]["dpos"] for info in infos], dtype=torch.long, device=dev
+            )
+            buf["real_dpos_class"][t] = dpos_to_class(dpos)
+            buf["real_success"][t] = torch.tensor(
+                [float(info["realized"]["success"]) for info in infos], device=dev
+            )
+            buf["real_denergy"][t] = torch.tensor(
+                [info["realized"]["denergy"] for info in infos], device=dev
+            )
             self._h = h_new
             self._done_prev = buf["done"][t]
             self._obs = obs
@@ -192,7 +238,8 @@ class PPOTrainer:
         h_in = self._h * (1.0 - self._done_prev).unsqueeze(-1)
         grid, intero = self._obs_tensors()
         out, _ = self.model.core(self.model.encoder(grid, intero), h_in)
-        _, next_value = self.model.heads(out)
+        features = build_policy_features(out, self.body_model)
+        _, next_value = self.model.heads(features)
         buf["next_value"] = next_value
 
         self.global_step += rollout_len * n
@@ -262,7 +309,9 @@ class PPOTrainer:
                     outs = replay_core(
                         self.model.core, embeds.reshape(seq, m, -1), h0, mb["done"]
                     )
-                    dist, value = self.model.heads(outs.reshape(seq * m, -1))
+                    flat_core_out = outs.reshape(seq * m, -1)
+                    features = build_policy_features(flat_core_out, self.body_model)
+                    dist, value = self.model.heads(features)
                     # (seq, M) -> flat, matching outs layout
                     flat_action = mb["action"].reshape(-1)
                     new_logp = dist.log_prob(flat_action)
@@ -308,6 +357,46 @@ class PPOTrainer:
 
         return {k: v / n_mb for k, v in metrics.items()}
 
+    # ---------------------------------------------------------- body model
+
+    def update_body_model(self, buf: dict[str, torch.Tensor]) -> dict[str, float]:
+        """One online gradient step for the body model on this rollout's fresh
+        transitions (``ppo`` has already been updated for this rollout, above;
+        the body model always trails one rollout behind the policy input it
+        fed, which is what keeps PPO's old/new logp comparison self-consistent
+        within a rollout — see ledger/body_model.py's module docstring)."""
+        t, n, core_dim = buf["core_out"].shape
+        h_detached = buf["core_out"].reshape(t * n, core_dim).detach()
+        action_onehot = torch.nn.functional.one_hot(
+            buf["action"].reshape(t * n), self.body_model.num_actions
+        ).float()
+        outputs = self.body_model.predict_action(h_detached, action_onehot)
+        losses = compute_body_losses(
+            outputs,
+            buf["real_dpos_class"].reshape(t * n),
+            buf["real_success"].reshape(t * n),
+            buf["real_denergy"].reshape(t * n),
+        )
+
+        self.body_opt.zero_grad()
+        losses["total"].backward()
+        self.body_opt.step()
+
+        body_nll = losses["body_nll"].item()
+        success_brier = losses["success_brier"].item()
+        denergy_mae = losses["denergy_mae"].item()
+        self.body_nll_history.append(body_nll)
+        return {
+            "ledger/body_nll": body_nll,
+            "ledger/body_nll_ema": self._body_nll_ema.update(body_nll),
+            "ledger/success_bce": losses["success_bce"].item(),
+            "ledger/success_brier": success_brier,
+            "ledger/success_brier_ema": self._success_brier_ema.update(success_brier),
+            "ledger/denergy_mse": losses["denergy_mse"].item(),
+            "ledger/denergy_mae": denergy_mae,
+            "ledger/denergy_mae_ema": self._denergy_mae_ema.update(denergy_mae),
+        }
+
     # ----------------------------------------------------------------- train
 
     def train(
@@ -348,6 +437,7 @@ class PPOTrainer:
                 t0 = time.perf_counter()
                 buf = self.collect_rollout()
                 metrics = self.update(buf)
+                metrics.update(self.update_body_model(buf))
                 elapsed = time.perf_counter() - t0
 
                 reward_rollout = buf["reward"].sum(dim=0).mean().item()
@@ -362,7 +452,8 @@ class PPOTrainer:
                 if updates_done % 10 == 1:
                     print(
                         f"step {self.global_step}  reward/rollout {reward_rollout:+.3f}  "
-                        f"kl {metrics['approx_kl']:.4f}  sps {metrics['sps']:,.0f}"
+                        f"kl {metrics['approx_kl']:.4f}  body_nll {metrics['ledger/body_nll']:.4f}  "
+                        f"sps {metrics['sps']:,.0f}"
                     )
 
                 interval = self.cfg["checkpoints"]["interval"]
@@ -413,6 +504,14 @@ class PPOTrainer:
             "hidden": self._h.detach().cpu().numpy(),
             "done_prev": self._done_prev.detach().cpu().numpy(),
             "reward_history": list(self.reward_history),
+            "body_model_state": self.body_model.state_dict(),
+            "body_opt_state": self.body_opt.state_dict(),
+            "body_nll_history": list(self.body_nll_history),
+            "body_ema": {
+                "body_nll": self._body_nll_ema.value,
+                "success_brier": self._success_brier_ema.value,
+                "denergy_mae": self._denergy_mae_ema.value,
+            },
         }
         out = save_checkpoint(
             path, self.model, self.opt, self.global_step, self.cfg, extra=extra
@@ -435,4 +534,11 @@ class PPOTrainer:
         self._h = torch.from_numpy(ckpt.extra["hidden"]).to(self.device)
         self._done_prev = torch.from_numpy(ckpt.extra["done_prev"]).to(self.device)
         self.reward_history = list(ckpt.extra.get("reward_history", []))
+        self.body_model.load_state_dict(ckpt.extra["body_model_state"])
+        self.body_opt.load_state_dict(ckpt.extra["body_opt_state"])
+        self.body_nll_history = list(ckpt.extra.get("body_nll_history", []))
+        ema = ckpt.extra.get("body_ema", {})
+        self._body_nll_ema.value = ema.get("body_nll")
+        self._success_brier_ema.value = ema.get("success_brier")
+        self._denergy_mae_ema.value = ema.get("denergy_mae")
         self._obs = self.vec.observe()

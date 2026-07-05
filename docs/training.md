@@ -96,7 +96,7 @@ not divide the rollout evenly.
 | sleep_every         | 5,000   | 2,000  | 5,000   |
 | sleep_grad_steps    | 200     | 20     | 200     |
 
-### `ledger` (not yet wired into training)
+### `ledger`
 
 | key               | value    |
 |-------------------|----------|
@@ -105,6 +105,22 @@ not divide the rollout evenly.
 | horizons          | 1, 10 (add 100 in Stage 6) |
 | lr                | 1.0e-3   |
 | online_updates    | true (body + reliability heads only) |
+| log_ema_decay     | 0.98 (additive: TB rolling-mean smoothing, not in the pasted defaults) |
+
+`ledger.body_hidden`/`lr` are wired into training as of Stage 3a
+(`ledger/body_model.py`, `training/ppo.py`'s `update_body_model`). The body
+model trains online — one gradient step per rollout, on that rollout's fresh
+transitions — with its own Adam optimizer, entirely separate from
+`self.opt` (the policy/value optimizer). `forecaster_hidden`, `horizons`, and
+`online_updates` are not yet wired (reliability/forecaster heads are still
+stubs).
+
+**Gradient isolation** (CLAUDE.md Hard rules): the body model's input is
+`h.detach()` concatenated with a one-hot action; its own CE+BCE+MSE loss can
+therefore never reach the encoder/GRU. Its output — fed to the policy as
+extra per-action features via `ledger.body_model.build_policy_features` — is
+independently detached before concatenation, so no policy gradient reaches
+the body model either. See `tests/test_grad_isolation.py`.
 
 ### `checkpoints`
 

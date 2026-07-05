@@ -84,12 +84,13 @@ rssm:                        # Stage 4 (not yet wired into training)
   sleep_every: 5_000          # env steps between consolidation windows
   sleep_grad_steps: 200
 
-ledger:                       # not yet wired into training
-  body_hidden: [128, 128]
-  forecaster_hidden: [256, 256]
+ledger:
+  body_hidden: [128, 128]       # stage-3a: body model, wired into training
+  forecaster_hidden: [256, 256] # not yet wired
   horizons: [1, 10]           # add 100 in Stage 6
   lr: 1.0e-3
   online_updates: true        # body + reliability heads only
+  log_ema_decay: 0.98          # additive: TB rolling-mean smoothing for ledger/* scalars
 
 checkpoints:
   interval: 50_000
