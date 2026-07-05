@@ -106,6 +106,9 @@ not divide the rollout evenly.
 | lr                | 1.0e-3   |
 | online_updates    | true (body + reliability heads only) |
 | log_ema_decay     | 0.98 (additive: TB rolling-mean smoothing, not in the pasted defaults) |
+| attribution.tau_pos    | 0.5 (additive: residual-magnitude threshold, DPOS_CLASSES Manhattan distance) |
+| attribution.tau_energy | 0.03 (additive: residual-magnitude threshold, \|denergy\|; must clear the body model's own regression noise floor — measured ~p99 0.026 on smoke — or the classifier collapses to always-WORLD) |
+| attribution.lr         | 1.0e-3 (additive) |
 
 `ledger.body_hidden`/`lr` are wired into training as of Stage 3a
 (`ledger/body_model.py`, `training/ppo.py`'s `update_body_model`). The body
@@ -121,6 +124,23 @@ therefore never reach the encoder/GRU. Its output — fed to the policy as
 extra per-action features via `ledger.body_model.build_policy_features` — is
 independently detached before concatenation, so no policy gradient reaches
 the body model either. See `tests/test_grad_isolation.py`.
+
+`ledger.attribution` is wired into training as of Stage 3b
+(`ledger/attribution.py`, `training/ppo.py`'s `update_attribution_model`). A
+tiny multinomial-logistic classifier maps three scalar features —
+`[|residual_pos|, |residual_energy|, action == noop]`, where the "predicted"
+side of the residual is the body model's own per-action prediction for the
+action taken — to one of `{self, world, both}`. It trains online, one
+gradient step per rollout, self-supervised from residual-magnitude
+thresholds (`tau_pos`/`tau_energy`); NOOP is a structural exception (always
+labeled `world`, since the action table guarantees NOOP has no self-caused
+effect), which is what makes "no-op ticks are never attributed to self" hold
+by construction. It is scored — never trained — against ground-truth cause
+labels from `world/levers.py`'s event log, via the deliberately-separate
+`training/attribution_eval.py` module (outside `ledger/`, so nothing that
+trains a Ledger head can import it). `PPOTrainer.write_report()` writes the
+cumulative accuracy, a self/world/both confusion matrix, and the
+noop-attributed-to-self violation count (must be 0) to `run_dir/report.md`.
 
 ### `checkpoints`
 

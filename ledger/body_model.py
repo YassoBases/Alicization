@@ -65,8 +65,10 @@ class BodyModel(nn.Module):
         }
 
     def forward(self, h_detached: torch.Tensor) -> dict[str, torch.Tensor]:
-        """(B, core_dim) detached -> {'success_prob': (B, A), 'denergy': (B, A)},
-        one prediction per possible action — used to feed the policy."""
+        """(B, core_dim) detached -> {'success_prob': (B, A), 'denergy': (B, A),
+        'dpos_class': (B, A) long}, one prediction per possible action — used
+        to feed the policy (success_prob/denergy) and, for the action actually
+        taken, the attribution head (dpos_class; see ledger/attribution.py)."""
         b, a = h_detached.shape[0], self.num_actions
         h_rep = h_detached.unsqueeze(1).expand(b, a, -1).reshape(b * a, -1)
         eye = torch.eye(a, device=h_detached.device).unsqueeze(0).expand(b, a, a)
@@ -74,6 +76,7 @@ class BodyModel(nn.Module):
         return {
             "success_prob": torch.sigmoid(out["success_logit"]).reshape(b, a),
             "denergy": out["denergy"].reshape(b, a),
+            "dpos_class": out["dpos_logits"].argmax(dim=-1).reshape(b, a),
         }
 
 
@@ -105,8 +108,10 @@ def compute_body_losses(
     }
 
 
-def build_policy_features(core_out: torch.Tensor, body_model: BodyModel) -> torch.Tensor:
-    """(B, core_dim), using ``body_model`` -> (B, core_dim + 2*num_actions).
+def build_policy_features(
+    core_out: torch.Tensor, body_model: BodyModel
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """(B, core_dim), using ``body_model`` -> ((B, core_dim + 2*num_actions), raw body_out).
 
     Concatenates the core output — left untouched, so the policy/value loss
     trains the encoder/core through it as usual — with the body model's
@@ -114,12 +119,17 @@ def build_policy_features(core_out: torch.Tensor, body_model: BodyModel) -> torc
     gradient reaches the body model, and (belt-and-suspenders, since
     ``BodyModel.forward`` is also given a detached input) no gradient reaches
     the core through the body-model path either.
+
+    The raw ``body_out`` dict (success_prob, denergy, dpos_class; all already
+    detached) is also returned so callers that need the taken-action's
+    prediction (e.g. the attribution head) don't need a second forward pass.
     """
     body_out = body_model(core_out.detach())
-    return torch.cat(
+    features = torch.cat(
         [core_out, body_out["success_prob"].detach(), body_out["denergy"].detach()],
         dim=-1,
     )
+    return features, body_out
 
 
 class RollingMean:

@@ -61,14 +61,14 @@ class VecWorld:
         for i, world in enumerate(self.worlds):
             action = int(actions[i])
             obs_i, info_i = world.step([action])
-            world.drain_events()  # keep the event buffer bounded
+            events = world.drain_events()  # ground truth; evaluation-only, see infos["events"]
             rewards[i] = compute_reward(
                 action=action,
                 success=info_i[0]["realized"]["success"],
                 energy=float(obs_i[0]["intero"][0]),
                 rcfg=self.reward_cfg,
             )
-            infos.append(info_i[0])
+            infos.append({**info_i[0], "events": events})
             self.ep_steps[i] += 1
             if self.ep_steps[i] >= self.episode_length:
                 dones[i] = 1.0

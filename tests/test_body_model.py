@@ -48,7 +48,10 @@ def test_body_model_forward_all_actions_shapes_and_range() -> None:
     out = model(h)
     assert out["success_prob"].shape == (4, NUM_ACTIONS)
     assert out["denergy"].shape == (4, NUM_ACTIONS)
+    assert out["dpos_class"].shape == (4, NUM_ACTIONS)
+    assert out["dpos_class"].dtype == torch.long
     assert torch.all((out["success_prob"] >= 0) & (out["success_prob"] <= 1))
+    assert torch.all((out["dpos_class"] >= 0) & (out["dpos_class"] < len(DPOS_CLASSES)))
 
 
 def test_body_model_predict_action_shapes() -> None:
@@ -76,6 +79,8 @@ def test_forward_all_actions_consistent_with_predict_action() -> None:
         expected_prob = torch.sigmoid(single["success_logit"])
         assert torch.allclose(all_out["success_prob"][:, action], expected_prob, atol=1e-6)
         assert torch.allclose(all_out["denergy"][:, action], single["denergy"], atol=1e-6)
+        expected_class = single["dpos_logits"].argmax(dim=-1)
+        assert torch.equal(all_out["dpos_class"][:, action], expected_class)
 
 
 def test_compute_body_losses_values() -> None:
@@ -120,5 +125,8 @@ def test_build_policy_features_shape() -> None:
     core_dim = 10
     body = BodyModel({"body_hidden": [8, 8]}, core_dim=core_dim, num_actions=NUM_ACTIONS)
     core_out = torch.randn(4, core_dim, requires_grad=True)
-    features = build_policy_features(core_out, body)
+    features, body_out = build_policy_features(core_out, body)
     assert features.shape == (4, core_dim + 2 * NUM_ACTIONS)
+    assert body_out["success_prob"].shape == (4, NUM_ACTIONS)
+    assert body_out["denergy"].shape == (4, NUM_ACTIONS)
+    assert body_out["dpos_class"].shape == (4, NUM_ACTIONS)

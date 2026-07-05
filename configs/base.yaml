@@ -91,6 +91,13 @@ ledger:
   lr: 1.0e-3
   online_updates: true        # body + reliability heads only
   log_ema_decay: 0.98          # additive: TB rolling-mean smoothing for ledger/* scalars
+  attribution:                 # stage-3b: self/world/both classifier, wired into training
+    tau_pos: 0.5                # Manhattan-distance residual threshold (DPOS_CLASSES vectors)
+    tau_energy: 0.03             # |denergy| residual threshold; empirically, ordinary
+    # body-model regression noise on denergy has ~median 0.014, ~p99 0.026 (measured
+    # on configs/smoke.yaml at 40k ticks) — tau_energy must clear that noise floor or
+    # the classifier collapses to always-WORLD. Re-measure if body_hidden/lr change.
+    lr: 1.0e-3
 
 checkpoints:
   interval: 50_000

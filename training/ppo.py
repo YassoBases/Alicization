@@ -27,6 +27,12 @@ import torch.nn as nn
 from agent.core_gru import GRUCore
 from agent.encoder import ObsEncoder
 from agent.policy import ActorCritic
+from ledger.attribution import (
+    AttributionHead,
+    compute_attribution_loss,
+    pseudo_label,
+    residual_features,
+)
 from ledger.body_model import (
     BodyModel,
     RollingMean,
@@ -34,10 +40,11 @@ from ledger.body_model import (
     compute_body_losses,
     dpos_to_class,
 )
+from training.attribution_eval import AttributionAccuracyTracker, ground_truth_label
 from training.checkpoints import load_checkpoint, prune_checkpoints, save_checkpoint
 from training.loggers import TBLogger
 from training.vecenv import VecWorld
-from world.engine import NUM_ACTIONS
+from world.engine import NOOP, NUM_ACTIONS
 
 
 def resolve_device(name: str) -> torch.device:
@@ -143,6 +150,15 @@ class PPOTrainer:
         self._denergy_mae_ema = RollingMean(ema_decay)
         self.body_nll_history: list[float] = []
 
+        acfg = lcfg["attribution"]
+        self.attribution_model = AttributionHead(acfg).to(self.device)
+        self.attr_opt = torch.optim.Adam(self.attribution_model.parameters(), lr=acfg["lr"])
+        self.attr_tau_pos = acfg["tau_pos"]
+        self.attr_tau_energy = acfg["tau_energy"]
+        self._attr_accuracy_ema = RollingMean(ema_decay)
+        self.attr_tracker = AttributionAccuracyTracker()
+        self.attribution_accuracy_history: list[float] = []
+
         n = self.pcfg["num_envs"]
         hidden = self.model.core.hidden_dim  # flat state size (layers * hidden_size)
         self._h = torch.zeros(n, hidden, device=self.device)
@@ -179,7 +195,14 @@ class PPOTrainer:
         Also records, per tick, the core output (``core_out``, detached —
         collection runs under ``torch.no_grad()`` throughout) and the realized
         transition (dpos class, success, denergy) from the vecenv info dicts,
-        for the body model's online update (see ``update_body_model``).
+        for the body model's online update (see ``update_body_model``); and
+        the body model's predicted (dpos class, denergy) for the action taken
+        plus the ground-truth cause label (see ``update_attribution_model``).
+        The ground-truth label is read here from vecenv info's ``events``
+        (world/levers.py's cause={self,world} log) purely to compare against
+        the attribution classifier's own prediction for reporting — it is a
+        plain Python int by the time it reaches ``buf``, never a tensor
+        upstream of any loss.
         """
         p = self.pcfg
         rollout_len, n, seq = p["rollout_steps"], p["num_envs"], p["seq_len"]
@@ -199,6 +222,9 @@ class PPOTrainer:
             "real_dpos_class": torch.zeros(rollout_len, n, dtype=torch.long, device=dev),
             "real_success": torch.zeros(rollout_len, n, device=dev),
             "real_denergy": torch.zeros(rollout_len, n, device=dev),
+            "pred_dpos_class": torch.zeros(rollout_len, n, dtype=torch.long, device=dev),
+            "pred_denergy": torch.zeros(rollout_len, n, device=dev),
+            "ground_truth_label": torch.zeros(rollout_len, n, dtype=torch.long, device=dev),
         }
         for t in range(rollout_len):
             h_in = self._h * (1.0 - self._done_prev).unsqueeze(-1)
@@ -207,7 +233,7 @@ class PPOTrainer:
             grid, intero = self._obs_tensors()
             embed = self.model.encoder(grid, intero)
             out, h_new = self.model.core(embed, h_in)
-            features = build_policy_features(out, self.body_model)
+            features, body_out = build_policy_features(out, self.body_model)
             dist, value = self.model.heads(features)
             action = dist.sample()
 
@@ -230,6 +256,18 @@ class PPOTrainer:
             buf["real_denergy"][t] = torch.tensor(
                 [info["realized"]["denergy"] for info in infos], device=dev
             )
+            action_idx = action.unsqueeze(-1)
+            buf["pred_dpos_class"][t] = body_out["dpos_class"].gather(1, action_idx).squeeze(-1)
+            buf["pred_denergy"][t] = body_out["denergy"].gather(1, action_idx).squeeze(-1)
+            # Ground truth: evaluation-only bookkeeping, never touches a loss.
+            buf["ground_truth_label"][t] = torch.tensor(
+                [
+                    ground_truth_label(int(a), info["events"])
+                    for a, info in zip(action.cpu().tolist(), infos)
+                ],
+                dtype=torch.long,
+                device=dev,
+            )
             self._h = h_new
             self._done_prev = buf["done"][t]
             self._obs = obs
@@ -238,7 +276,7 @@ class PPOTrainer:
         h_in = self._h * (1.0 - self._done_prev).unsqueeze(-1)
         grid, intero = self._obs_tensors()
         out, _ = self.model.core(self.model.encoder(grid, intero), h_in)
-        features = build_policy_features(out, self.body_model)
+        features, _ = build_policy_features(out, self.body_model)
         _, next_value = self.model.heads(features)
         buf["next_value"] = next_value
 
@@ -310,7 +348,7 @@ class PPOTrainer:
                         self.model.core, embeds.reshape(seq, m, -1), h0, mb["done"]
                     )
                     flat_core_out = outs.reshape(seq * m, -1)
-                    features = build_policy_features(flat_core_out, self.body_model)
+                    features, _ = build_policy_features(flat_core_out, self.body_model)
                     dist, value = self.model.heads(features)
                     # (seq, M) -> flat, matching outs layout
                     flat_action = mb["action"].reshape(-1)
@@ -397,6 +435,47 @@ class PPOTrainer:
             "ledger/denergy_mae_ema": self._denergy_mae_ema.update(denergy_mae),
         }
 
+    # ------------------------------------------------------- attribution
+
+    def update_attribution_model(self, buf: dict[str, torch.Tensor]) -> dict[str, float]:
+        """One online gradient step for the attribution classifier, self-
+        supervised from residual-magnitude thresholds (never from
+        ``ground_truth_label``, which is used only afterward to score the
+        prediction — see ``training/attribution_eval.py``)."""
+        t, n = buf["action"].shape
+        action = buf["action"].reshape(t * n)
+        features = residual_features(
+            buf["pred_dpos_class"].reshape(t * n),
+            buf["real_dpos_class"].reshape(t * n),
+            buf["pred_denergy"].reshape(t * n),
+            buf["real_denergy"].reshape(t * n),
+            action,
+            noop_action=NOOP,
+        )
+        labels = pseudo_label(features, self.attr_tau_pos, self.attr_tau_energy)
+        logits = self.attribution_model(features)
+        loss = compute_attribution_loss(logits, labels)
+
+        self.attr_opt.zero_grad()
+        loss.backward()
+        self.attr_opt.step()
+
+        with torch.no_grad():
+            predicted = logits.argmax(dim=-1)
+        ground_truth = buf["ground_truth_label"].reshape(t * n)
+        for p_i, g_i, a_i in zip(
+            predicted.tolist(), ground_truth.tolist(), action.tolist()
+        ):
+            self.attr_tracker.update(p_i, g_i, a_i)
+
+        rollout_accuracy = (predicted == ground_truth).float().mean().item()
+        self.attribution_accuracy_history.append(rollout_accuracy)
+        return {
+            "ledger/attribution_loss": loss.item(),
+            "ledger/attribution_accuracy": rollout_accuracy,
+            "ledger/attribution_accuracy_ema": self._attr_accuracy_ema.update(rollout_accuracy),
+        }
+
     # ----------------------------------------------------------------- train
 
     def train(
@@ -438,6 +517,7 @@ class PPOTrainer:
                 buf = self.collect_rollout()
                 metrics = self.update(buf)
                 metrics.update(self.update_body_model(buf))
+                metrics.update(self.update_attribution_model(buf))
                 elapsed = time.perf_counter() - t0
 
                 reward_rollout = buf["reward"].sum(dim=0).mean().item()
@@ -453,6 +533,7 @@ class PPOTrainer:
                     print(
                         f"step {self.global_step}  reward/rollout {reward_rollout:+.3f}  "
                         f"kl {metrics['approx_kl']:.4f}  body_nll {metrics['ledger/body_nll']:.4f}  "
+                        f"attr_acc {metrics['ledger/attribution_accuracy']:.3f}  "
                         f"sps {metrics['sps']:,.0f}"
                     )
 
@@ -475,6 +556,8 @@ class PPOTrainer:
         completed = self.global_step >= p["total_steps"]
         if self.cfg["run"].get("assert_improvement") and completed and not self._interrupted:
             self._assert_improvement()
+        if self.run_dir is not None:
+            self.write_report()
 
     def _on_sigint(self, signum: int, frame: Any) -> None:
         del signum, frame
@@ -490,6 +573,47 @@ class PPOTrainer:
             raise RuntimeError(
                 f"reward/rollout did not improve: first {first:+.4f}, last {last:+.4f}"
             )
+
+    # ------------------------------------------------------------- report
+
+    def write_report(self) -> Path:
+        """Markdown summary of the run so far, written to run_dir/report.md.
+
+        Attribution accuracy is reported here against ``ground_truth_label``
+        (world/levers.py's ground-truth cause log) — evaluation only; this
+        method runs after training and never feeds back into any loss.
+        """
+        assert self.run_dir is not None
+        t = self.attr_tracker
+        reward_tail = float(np.mean(self.reward_history[-10:])) if self.reward_history else float("nan")
+        body_nll_tail = float(np.mean(self.body_nll_history[-10:])) if self.body_nll_history else float("nan")
+        n_tail = max(1, len(self.attribution_accuracy_history) // 5)  # last ~20% of rollouts
+        attr_tail = (
+            float(np.mean(self.attribution_accuracy_history[-n_tail:]))
+            if self.attribution_accuracy_history else float("nan")
+        )
+        lines = [
+            f"# Run report: {self.run_dir.name}",
+            "",
+            f"- global_step: {self.global_step}",
+            f"- reward/rollout (last 10 mean): {reward_tail:+.4f}",
+            f"- ledger/body_nll (last 10 mean): {body_nll_tail:.4f}",
+            "",
+            "## Attribution vs. ground truth (world/levers.py cause log; evaluation only)",
+            "",
+            f"- ticks scored (whole run): {t.total}",
+            f"- accuracy (whole-run cumulative, includes early self-supervised warm-up): {t.accuracy:.4f}",
+            f"- accuracy (steady-state, last {n_tail} rollouts): {attr_tail:.4f}",
+            f"- noop-attributed-to-self violations (whole run): {t.noop_self_violations}",
+            "",
+            "Confusion matrix (rows=ground truth, cols=predicted; self/world/both; whole run):",
+            "",
+        ]
+        for row in t.confusion:
+            lines.append(f"    {row}")
+        report_path = self.run_dir / "report.md"
+        report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return report_path
 
     # ------------------------------------------------------------ checkpoint
 
@@ -512,6 +636,11 @@ class PPOTrainer:
                 "success_brier": self._success_brier_ema.value,
                 "denergy_mae": self._denergy_mae_ema.value,
             },
+            "attribution_model_state": self.attribution_model.state_dict(),
+            "attr_opt_state": self.attr_opt.state_dict(),
+            "attr_accuracy_ema": self._attr_accuracy_ema.value,
+            "attr_tracker_state": self.attr_tracker.state_dict(),
+            "attribution_accuracy_history": list(self.attribution_accuracy_history),
         }
         out = save_checkpoint(
             path, self.model, self.opt, self.global_step, self.cfg, extra=extra
@@ -541,4 +670,12 @@ class PPOTrainer:
         self._body_nll_ema.value = ema.get("body_nll")
         self._success_brier_ema.value = ema.get("success_brier")
         self._denergy_mae_ema.value = ema.get("denergy_mae")
+        self.attribution_model.load_state_dict(ckpt.extra["attribution_model_state"])
+        self.attr_opt.load_state_dict(ckpt.extra["attr_opt_state"])
+        self._attr_accuracy_ema.value = ckpt.extra.get("attr_accuracy_ema")
+        if "attr_tracker_state" in ckpt.extra:
+            self.attr_tracker.load_state_dict(ckpt.extra["attr_tracker_state"])
+        self.attribution_accuracy_history = list(
+            ckpt.extra.get("attribution_accuracy_history", [])
+        )
         self._obs = self.vec.observe()
