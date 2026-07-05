@@ -40,6 +40,24 @@ def test_dpos_to_class_batch() -> None:
     assert len(DPOS_CLASSES) == 5
 
 
+def test_dpos_to_class_compound_delta_maps_to_nearest_not_stay() -> None:
+    """A compound delta (e.g. a self-move + same-tick ghost push landing on a
+    diagonal) is not in DPOS_CLASSES. Regression: this used to silently fall
+    through to class 0 ("stay") -- systematically wrong, since the agent
+    manifestly moved. It must map to the nearest class by Manhattan distance
+    instead, and exact matches must be unaffected."""
+    # (1, -1): distance 1 from both class 1 (0,-1)="N" and class 3 (1,0)="E",
+    # distance 2 from class 0 (0,0)="stay" -- must NOT resolve to "stay".
+    dpos = torch.tensor([[1, -1]], dtype=torch.long)
+    result = int(dpos_to_class(dpos)[0])
+    assert result != 0, "compound delta must not be mislabeled as 'stay'"
+    assert result in (1, 3)  # nearest ties: N or E, both distance 1
+
+    # Exact matches must still resolve exactly (no regression from the fix).
+    exact = torch.tensor([[0, 0], [0, -1], [0, 1], [1, 0], [-1, 0]], dtype=torch.long)
+    assert dpos_to_class(exact).tolist() == [0, 1, 2, 3, 4]
+
+
 def test_body_model_forward_all_actions_shapes_and_range() -> None:
     torch.manual_seed(0)
     core_dim = 12

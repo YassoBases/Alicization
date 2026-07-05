@@ -16,6 +16,8 @@ gradient anywhere).
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import torch
 
 from agent.core_gru import GRUCore
@@ -23,9 +25,12 @@ from agent.encoder import ObsEncoder
 from agent.policy import ActorCritic
 from ledger.attribution import AttributionHead, compute_attribution_loss, pseudo_label, residual_features
 from ledger.body_model import BodyModel, build_policy_features, compute_body_losses
+from training.ppo import PPOTrainer
+from world.config import load_config
 from world.engine import NOOP
 
 NUM_ACTIONS = 9
+ROOT = Path(__file__).resolve().parent.parent
 
 
 def _no_grad_reached(params) -> bool:
@@ -135,3 +140,36 @@ def test_attribution_loss_does_not_reach_core_or_body_model() -> None:
         "attribution loss leaked gradient into encoder/core/body-model parameters"
     )
     assert _some_grad_reached(attribution.parameters())
+
+
+def test_integration_ledger_updates_never_touch_policy_params_via_real_trainer() -> None:
+    """Same guarantee as the tests above, but through the REAL PPOTrainer
+    wiring (collect_rollout -> update_body_model -> update_attribution_model),
+    not just hand-assembled synthetic tensors — catches integration-level
+    leaks a unit test could miss (e.g. an optimizer accidentally sweeping
+    Ledger parameters, or a submodule registered where it shouldn't be)."""
+    cfg = load_config(ROOT / "configs" / "smoke.yaml")
+    cfg["seed"] = 3
+    cfg["device"] = "cpu"
+    cfg["agent"] = {"hidden_size": 16, "gru_layers": 1, "encoder_channels": [4, 8]}
+    cfg["ppo"].update(
+        rollout_steps=8, seq_len=4, num_envs=2, episode_length=16,
+        minibatch_transitions=8, epochs=1, total_steps=10**9, anneal_lr=False,
+    )
+    cfg["run"]["assert_improvement"] = False
+
+    trainer = PPOTrainer(cfg)
+    policy_params = list(trainer.model.parameters())
+    assert all(p.grad is None for p in policy_params)  # freshly constructed, no grad yet
+
+    buf = trainer.collect_rollout()  # @torch.no_grad(): cannot populate any .grad
+    trainer.update_body_model(buf)
+    trainer.update_attribution_model(buf)
+
+    assert all(p.grad is None for p in policy_params), (
+        "body-model/attribution updates left gradient on encoder/core/policy parameters "
+        "-- Ledger optimizers must never touch them"
+    )
+    # Sanity: the Ledger heads themselves DID get gradient (not a vacuous pass).
+    assert _some_grad_reached(trainer.body_model.parameters())
+    assert _some_grad_reached(trainer.attribution_model.parameters())

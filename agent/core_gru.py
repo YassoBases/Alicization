@@ -44,7 +44,7 @@ class GRUCore(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """One step: (B, input_dim), (B, hidden_dim) ->
         (top-layer output (B, output_dim), next flat hidden (B, hidden_dim))."""
-        h_layers = h.view(h.shape[0], self.num_layers, self.layer_size)
+        h_layers = h.reshape(h.shape[0], self.num_layers, self.layer_size)
         x = embed
         next_layers = []
         for i, cell in enumerate(self.cells):

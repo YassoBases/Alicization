@@ -25,14 +25,24 @@ import torch.nn.functional as F
 # (MOVE_N/S/E/W); any non-move action, or a blocked/failed move, realizes
 # dpos=(0, 0) ("stay").
 DPOS_CLASSES: tuple[tuple[int, int], ...] = ((0, 0), (0, -1), (0, 1), (1, 0), (-1, 0))
+_DPOS_VECTORS_INT = torch.tensor(DPOS_CLASSES, dtype=torch.long)  # (5, 2)
 
 
 def dpos_to_class(dpos: torch.Tensor) -> torch.Tensor:
-    """(B, 2) integer dpos -> (B,) long class index into DPOS_CLASSES."""
-    out = torch.zeros(dpos.shape[0], dtype=torch.long, device=dpos.device)
-    for i, (dx, dy) in enumerate(DPOS_CLASSES):
-        out[(dpos[:, 0] == dx) & (dpos[:, 1] == dy)] = i
-    return out
+    """(B, 2) integer dpos -> (B,) long class index into DPOS_CLASSES.
+
+    Realized dpos is normally exactly one of DPOS_CLASSES. It can rarely be a
+    compound value outside that set — e.g. the agent's own successful move
+    combines with an unrelated same-tick ghost push (world/levers.py), giving
+    e.g. (1, -1). Mapping every non-exact-match to class 0 ("stay") would be a
+    silent, systematic mislabel (the agent manifestly did move); nearest
+    DPOS_CLASSES entry by Manhattan distance is a strictly better fallback,
+    and it's a no-op for the overwhelming majority of exact-match ticks
+    (distance 0 always wins the argmin).
+    """
+    vecs = _DPOS_VECTORS_INT.to(dpos.device)
+    diffs = (dpos.unsqueeze(1) - vecs.unsqueeze(0)).abs().sum(dim=-1)  # (B, 5)
+    return diffs.argmin(dim=-1)
 
 
 class BodyModel(nn.Module):
