@@ -2,7 +2,7 @@
 # smoke.yaml / full.yaml inherit from this file and override.
 
 seed: 0
-device: cpu
+device: auto              # cuda if available else cpu; --device overrides
 
 world:
   grid_size: 64
@@ -37,13 +37,15 @@ world:
 model:
   core: gru                 # gru | rssm
   core_hidden: 256
-  obs_embed_dim: 128
-  encoder_channels: [16, 32]
+  obs_embed_dim: 256
+  encoder_channels: [32, 64]
 
 ppo:
   total_env_steps: 5000000
   num_envs: 8
   rollout_length: 256
+  seq_len: 32               # BPTT chunk; must divide rollout_length
+  episode_length: 2048      # trainer-side time limit -> done + env rebuild
   lr: 3.0e-4
   anneal_lr: true
   gamma: 0.99
@@ -53,10 +55,19 @@ ppo:
   num_minibatches: 8
   entropy_coef: 0.01
   value_coef: 0.5
+  value_clip: 0.2           # null disables value clipping
   max_grad_norm: 0.5
+  norm_adv: true
+  amp_bf16: false           # optional bf16 autocast; model is tiny, default off
+  reward:                   # baseline task terms; see training/reward.py
+    eat: 1.0
+    step_cost: 0.001
+    deficit_threshold: 0.2
+    deficit_penalty: 0.01
 
 run:
   checkpoint_every: 100000
   keep_last: 5
   log_every: 1000
   run_dir: runs
+  assert_improvement: false

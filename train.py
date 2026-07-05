@@ -2,6 +2,7 @@
 
 Usage:
     python train.py --config configs/smoke.yaml [--dry-run] [--resume PATH]
+                    [--device cpu|cuda] [--allow-config-mismatch]
 """
 
 from __future__ import annotations
@@ -22,6 +23,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--resume", default=None, help="checkpoint .pt to resume from")
     parser.add_argument(
+        "--device", default=None, help="override config device (cpu, cuda, auto)"
+    )
+    parser.add_argument(
         "--allow-config-mismatch",
         action="store_true",
         help="resume even if the checkpoint was written under a different config",
@@ -32,6 +36,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     cfg = load_config(args.config)
+    if args.device is not None:
+        cfg["device"] = args.device
 
     if args.dry_run:
         print(f"# resolved config: {args.config}")
@@ -40,22 +46,16 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # Deferred import: keeps --dry-run usable without torch installed.
-    from training.checkpoints import load_checkpoint
+    from training.loggers import create_run_dir
     from training.ppo import PPOTrainer
 
-    if args.resume is not None:
-        # Validate the checkpoint against the active config up front, without a
-        # model: PPOTrainer re-loads it into its modules inside train().
-        ckpt = load_checkpoint(
-            args.resume,
-            cfg=cfg,
-            restore_rng=False,
-            allow_config_mismatch=args.allow_config_mismatch,
-        )
-        print(f"resuming from {args.resume} at step {ckpt.step}")
-
-    trainer = PPOTrainer(cfg)
-    trainer.train(resume_from=args.resume)
+    run_dir = create_run_dir(cfg["run"]["run_dir"])
+    print(f"run dir: {run_dir}")
+    trainer = PPOTrainer(cfg, run_dir=run_dir)
+    print(f"device: {trainer.device}")
+    trainer.train(
+        resume_from=args.resume, allow_config_mismatch=args.allow_config_mismatch
+    )
     return 0
 
 
