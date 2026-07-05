@@ -2,6 +2,7 @@
 
 Same interface as agent.core_gru.GRUCore; adds a stochastic latent and a
 world-prediction loss. Core trains only on world-prediction + task loss.
+Config: the top-level ``rssm`` section (deter, stoch, embed, ensemble_k, ...).
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ class RSSMCore(nn.Module):
         raise NotImplementedError
 
     def initial_state(self, batch_size: int, device: torch.device) -> torch.Tensor:
-        """Zero state of shape (B, core_hidden [+ stochastic dims])."""
+        """Zero state of shape (B, deter + stoch)."""
         raise NotImplementedError
 
     def forward(

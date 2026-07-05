@@ -1,24 +1,30 @@
 # Base config. Values mirror docs/training.md "Training Defaults" (base column).
 # smoke.yaml / full.yaml inherit from this file and override.
+#
+# Sized for a laptop GPU (>=4 GB VRAM) but everything runs on CPU too.
 
-seed: 0
-device: auto              # cuda if available else cpu; --device overrides
+seed: 7
+device: auto              # auto -> cuda if torch.cuda.is_available() else cpu
+amp: false                 # optional bf16 autocast; enable only if profiled faster
 
 world:
-  grid_size: 64
-  day_length: 1000          # ticks per day/night cycle
-  night_start_frac: 0.5     # fraction of the day after which it is night
-  window: 11                # egocentric observation window (odd)
+  size: 64
+  obs_window: 11
+  day_length: 1000
+  # Everything below is engine detail not covered by the pasted training
+  # defaults; kept from the stage-1 world build-out (docs/logging.md /
+  # world/engine.py). Config-driven per the "no magic numbers" rule.
+  night_start_frac: 0.5
   terrain:
     num_types: 3
-    move_cost: [1.0, 2.0, 4.0]   # energy multiplier per terrain type
+    move_cost: [1.0, 2.0, 4.0]
     frequencies: [0.7, 0.2, 0.1]
   energy:
     init: 1.0
     max: 1.0
-    move_cost: 0.002        # per move, scaled by terrain move_cost
-    base_drain: 0.0005      # per tick, always
-    night_drain: 0.002      # extra per tick at night when not on a shelter tile
+    move_cost: 0.002
+    base_drain: 0.0005
+    night_drain: 0.002
     eat_gain: 0.25
   fatigue:
     init: 0.0
@@ -27,47 +33,69 @@ world:
     rest_recovery: 0.02
   food:
     num_patches: 40
-    regrow_interval_range: [200, 800]   # per-patch, sampled once at world gen
+    regrow_interval_range: [200, 800]
   water:
     num_tiles: 30
   shelter:
     num_tiles: 12
-  levers: null              # experiment levers off by default; see world/levers.py
+  levers: null
 
-model:
-  core: gru                 # gru | rssm
-  core_hidden: 256
-  obs_embed_dim: 256
+agent:
   encoder_channels: [32, 64]
+  hidden_size: 256           # GRU hidden / RSSM deterministic size
+  gru_layers: 1
 
 ppo:
-  total_env_steps: 5000000
-  num_envs: 8
-  rollout_length: 256
-  seq_len: 32               # BPTT chunk; must divide rollout_length
-  episode_length: 2048      # trainer-side time limit -> done + env rebuild
+  num_envs: 16
+  rollout_steps: 128        # per env per update -> 2048 transitions/update
+  seq_len: 16                # BPTT chunk; must divide rollout_steps
+  epochs: 4
+  minibatch_transitions: 256
   lr: 3.0e-4
-  anneal_lr: true
   gamma: 0.99
   gae_lambda: 0.95
-  clip_range: 0.2
-  update_epochs: 4
-  num_minibatches: 8
+  clip: 0.2
   entropy_coef: 0.01
   value_coef: 0.5
-  value_clip: 0.2           # null disables value clipping
   max_grad_norm: 0.5
+  total_steps: 2_000_000
+  # Additive knobs (not in the pasted defaults) needed by this implementation:
+  anneal_lr: true
   norm_adv: true
-  amp_bf16: false           # optional bf16 autocast; model is tiny, default off
-  reward:                   # baseline task terms; see training/reward.py
+  value_clip: 0.2            # null disables value clipping
+  episode_length: 2048       # trainer-side time limit -> done + env rebuild
+  reward:                    # baseline task terms; see training/reward.py
     eat: 1.0
     step_cost: 0.001
     deficit_threshold: 0.2
     deficit_penalty: 0.01
 
+rssm:                        # Stage 4 (not yet wired into training)
+  deter: 256
+  stoch: 32                  # Gaussian latent
+  embed: 256
+  ensemble_k: 4               # dynamics heads for epistemic disagreement
+  seq_len: 50
+  batch_seqs: 16
+  world_lr: 3.0e-4
+  ac_lr: 1.0e-4
+  imagination_horizon: 15
+  replay_capacity: 500_000
+  sleep_every: 5_000          # env steps between consolidation windows
+  sleep_grad_steps: 200
+
+ledger:                       # not yet wired into training
+  body_hidden: [128, 128]
+  forecaster_hidden: [256, 256]
+  horizons: [1, 10]           # add 100 in Stage 6
+  lr: 1.0e-3
+  online_updates: true        # body + reliability heads only
+
+checkpoints:
+  interval: 50_000
+  keep_last: 3
+
 run:
-  checkpoint_every: 100000
-  keep_last: 5
-  log_every: 1000
   run_dir: runs
+  log_every: 1000
   assert_improvement: false

@@ -1,6 +1,6 @@
 """Config loading and resolution.
 
-YAML configs live in configs/. A config may declare ``inherits: <relative path>``;
+YAML configs live in configs/. A config may declare ``inherit: <relative path>``;
 the parent is loaded first and the child is deep-merged on top. The resolved config
 is a plain nested dict; ``config_hash`` produces a stable digest of it for
 checkpoint compatibility checks.
@@ -28,11 +28,11 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
-    """Load a YAML config, resolving the ``inherits`` chain relative to the file."""
+    """Load a YAML config, resolving the ``inherit`` chain relative to the file."""
     path = Path(path)
     with open(path, "r", encoding="utf-8") as f:
         cfg: dict[str, Any] = yaml.safe_load(f) or {}
-    parent_rel = cfg.pop("inherits", None)
+    parent_rel = cfg.pop("inherit", None)
     if parent_rel is not None:
         parent = load_config(path.parent / parent_rel)
         cfg = deep_merge(parent, cfg)

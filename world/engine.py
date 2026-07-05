@@ -56,10 +56,10 @@ class World:
         """Build the world from a resolved config dict (top-level: seed, world)."""
         self.cfg = cfg
         wcfg = cfg["world"]
-        self.size: int = wcfg["grid_size"]
+        self.size: int = wcfg["size"]
         self.day_length: int = wcfg["day_length"]
         self.night_start: int = int(wcfg["night_start_frac"] * self.day_length)
-        self.window: int = wcfg["window"]
+        self.window: int = wcfg["obs_window"]
         assert self.window % 2 == 1, "observation window must be odd"
         self._pad = self.window // 2
 

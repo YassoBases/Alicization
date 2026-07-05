@@ -1,16 +1,8 @@
-# Full config: long experiment run.
-# Values mirror docs/training.md "Training Defaults" (full column).
+# Full config: long experiment run — hours to overnight on a laptop.
+# Per the scale-up path in docs/training.md: change one axis at a time; if
+# reward collapses after a scale-up, check seq_len vs. episode structure and lr.
 
-inherits: base.yaml
+inherit: base.yaml
 
-model:
-  core_hidden: 512
-
-ppo:
-  total_env_steps: 50000000
-  num_envs: 16
-  gamma: 0.997
-
-run:
-  checkpoint_every: 250000
-  keep_last: 10
+agent: {hidden_size: 384}
+ppo: {num_envs: 32, total_steps: 10_000_000}

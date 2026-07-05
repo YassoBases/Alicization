@@ -1,33 +1,10 @@
 # Smoke config: tiny run that must finish < 3 min on CPU.
 # Values mirror docs/training.md "Training Defaults" (smoke column).
 
-inherits: base.yaml
+inherit: base.yaml
 
-world:
-  food:                       # dense, fast food so the learning trend is
-    num_patches: 400          # visible above eat-event Poisson noise within
-    regrow_interval_range: [20, 60]   # the tiny smoke step budget
-  levers: null
-
-model:
-  core_hidden: 64
-  obs_embed_dim: 32
-  encoder_channels: [8, 16]
-
-ppo:
-  total_env_steps: 40000
-  num_envs: 2
-  rollout_length: 64
-  seq_len: 16
-  episode_length: 256
-  lr: 2.0e-3
-  anneal_lr: false
-  update_epochs: 2
-  num_minibatches: 2
-  entropy_coef: 0.005
-
-run:
-  checkpoint_every: 10000
-  keep_last: 2
-  log_every: 500
-  assert_improvement: true
+agent: {hidden_size: 64}
+ppo: {num_envs: 4, rollout_steps: 32, total_steps: 20_000}
+rssm: {deter: 64, stoch: 8, seq_len: 20, batch_seqs: 4, replay_capacity: 20_000,
+       sleep_every: 2_000, sleep_grad_steps: 20}
+world: {size: 32}

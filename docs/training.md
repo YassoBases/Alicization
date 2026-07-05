@@ -1,67 +1,131 @@
 # Training
 
-> **PLACEHOLDER VALUES.** The Training Defaults below are provisional and were not
-> supplied by the project owner yet. When the canonical values are provided, update
-> this table and regenerate `configs/base.yaml` / `configs/smoke.yaml` /
-> `configs/full.yaml` from it. Configs must always mirror this section.
-
 ## Training Defaults
 
-### Algorithm (recurrent PPO)
+Sized for a laptop GPU (≥4 GB VRAM) but everything runs on CPU too — the models are
+~1–2M params; the usual bottleneck is the Python env, not the GPU. Vectorize first,
+buy speed with AMP last.
 
-| key                | base    | smoke  | full      |
-|--------------------|---------|--------|-----------|
-| total_env_steps    | 5000000 | 40000  | 50000000  |
-| num_envs           | 8       | 2      | 16        |
-| rollout_length     | 256     | 64     | 256       |
-| seq_len (BPTT)     | 32      | 16     | 32        |
-| episode_length     | 2048    | 256    | 2048      |
-| lr                 | 3.0e-4  | 2.0e-3 | 3.0e-4    |
-| anneal_lr          | true    | false  | true      |
-| gamma              | 0.99    | 0.99   | 0.997     |
-| gae_lambda         | 0.95    | 0.95   | 0.95      |
-| clip_range         | 0.2     | 0.2    | 0.2       |
-| update_epochs      | 4       | 2      | 4         |
-| num_minibatches    | 8       | 2      | 8         |
-| entropy_coef       | 0.01    | 0.005  | 0.01      |
-| value_coef         | 0.5     | 0.5    | 0.5       |
-| value_clip         | 0.2     | 0.2    | 0.2       |
-| max_grad_norm      | 0.5     | 0.5    | 0.5       |
-| norm_adv           | true    | true   | true      |
-| amp_bf16           | false   | false  | false     |
+Values below are the canonical defaults (as of 2026-07-05); `configs/base.yaml`,
+`configs/smoke.yaml`, and `configs/full.yaml` must always mirror this section.
+`smoke.yaml` and `full.yaml` `inherit: base.yaml` and override only the listed keys.
 
-### Baseline reward (training/reward.py, `ppo.reward`)
+### Top level
 
-| key               | value |
-|-------------------|-------|
-| eat               | 1.0   |
-| step_cost         | 0.001 |
-| deficit_threshold | 0.2   |
-| deficit_penalty   | 0.01  |
+| key    | base | smoke | full |
+|--------|------|-------|------|
+| seed   | 7    | 7     | 7    |
+| device | auto | auto  | auto |
+| amp    | false| false | false|
 
-### Model
+### `world`
 
-| key                 | base  | smoke | full  |
-|---------------------|-------|-------|-------|
-| core                | gru   | gru   | gru   |
-| core_hidden         | 256   | 64    | 512   |
-| obs_embed_dim       | 256   | 32    | 256   |
-| encoder_channels    | 32,64 | 8,16  | 32,64 |
+| key        | base | smoke | full |
+|------------|------|-------|------|
+| size       | 64   | 32    | 64   |
+| obs_window | 11   | 11    | 11   |
+| day_length | 1000 | 1000  | 1000 |
 
-### Run management
+`world.terrain`, `energy`, `fatigue`, `food`, `water`, `shelter`, `levers`, and
+`night_start_frac` are engine detail from the stage-1 world build-out, not part of
+the pasted training defaults; see `world/engine.py` and `docs/logging.md`. They are
+unchanged across base/smoke/full.
 
-| key                | base    | smoke | full    |
-|--------------------|---------|-------|---------|
-| seed               | 0       | 0     | 0       |
-| device             | auto    | auto  | auto    |
-| checkpoint_every   | 100000  | 10000 | 250000  |
-| keep_last          | 5       | 2     | 10      |
-| log_every          | 1000    | 500   | 1000    |
-| assert_improvement | false   | true  | false   |
+### `agent`
 
-The smoke config also overrides the world food density
-(`num_patches: 400`, `regrow_interval_range: [20, 60]`) so the reward trend is
-visible above eat-event Poisson noise within its tiny step budget.
+| key              | base   | smoke | full   |
+|------------------|--------|-------|--------|
+| encoder_channels | 32, 64 | 32, 64| 32, 64 |
+| hidden_size      | 256    | 64    | 384    |
+| gru_layers       | 1      | 1     | 1      |
+
+`agent.hidden_size` doubles as the observation-embedding width (see
+`agent/encoder.py`) — there is no separate embed-dim config key.
+
+### `ppo`
+
+| key                   | base      | smoke  | full       |
+|-----------------------|-----------|--------|------------|
+| num_envs              | 16        | 4      | 32         |
+| rollout_steps         | 128       | 32     | 128        |
+| seq_len (BPTT)        | 16        | 16     | 16         |
+| epochs                | 4         | 4      | 4          |
+| minibatch_transitions | 256       | 256    | 256        |
+| lr                    | 3.0e-4    | 3.0e-4 | 3.0e-4     |
+| gamma                 | 0.99      | 0.99   | 0.99       |
+| gae_lambda            | 0.95      | 0.95   | 0.95       |
+| clip                  | 0.2       | 0.2    | 0.2        |
+| entropy_coef          | 0.01      | 0.01   | 0.01       |
+| value_coef            | 0.5       | 0.5    | 0.5        |
+| max_grad_norm         | 0.5       | 0.5    | 0.5        |
+| total_steps           | 2,000,000 | 20,000 | 10,000,000 |
+
+`ppo.reward`, `episode_length`, `anneal_lr`, `norm_adv`, and `value_clip` are
+additive knobs this implementation needs that weren't part of the pasted
+defaults (below); unchanged across base/smoke/full unless noted.
+
+| key                       | value |
+|---------------------------|-------|
+| reward.eat                | 1.0   |
+| reward.step_cost          | 0.001 |
+| reward.deficit_threshold  | 0.2   |
+| reward.deficit_penalty    | 0.01  |
+| episode_length (base/full)| 2048  |
+| anneal_lr (base/full)     | true  |
+| norm_adv                  | true  |
+| value_clip                | 0.2   |
+
+`minibatch_transitions` sizes minibatches in raw env-step units; the trainer
+converts it to a count of BPTT sequences (`training/ppo.py:update`) and it need
+not divide the rollout evenly.
+
+### `rssm` (Stage 4 — not yet wired into training)
+
+| key                 | base    | smoke  | full    |
+|---------------------|---------|--------|---------|
+| deter               | 256     | 64     | 256     |
+| stoch               | 32      | 8      | 32      |
+| embed               | 256     | 256    | 256     |
+| ensemble_k          | 4       | 4      | 4       |
+| seq_len             | 50      | 20     | 50      |
+| batch_seqs          | 16      | 4      | 16      |
+| world_lr            | 3.0e-4  | 3.0e-4 | 3.0e-4  |
+| ac_lr               | 1.0e-4  | 1.0e-4 | 1.0e-4  |
+| imagination_horizon | 15      | 15     | 15      |
+| replay_capacity     | 500,000 | 20,000 | 500,000 |
+| sleep_every         | 5,000   | 2,000  | 5,000   |
+| sleep_grad_steps    | 200     | 20     | 200     |
+
+### `ledger` (not yet wired into training)
+
+| key               | value    |
+|-------------------|----------|
+| body_hidden       | 128, 128 |
+| forecaster_hidden | 256, 256 |
+| horizons          | 1, 10 (add 100 in Stage 6) |
+| lr                | 1.0e-3   |
+| online_updates    | true (body + reliability heads only) |
+
+### `checkpoints`
+
+| key      | base   | smoke | full    |
+|----------|--------|-------|---------|
+| interval | 50,000 | 50,000| 50,000  |
+| keep_last| 3      | 3     | 3       |
+
+### `run` (not part of the pasted defaults; run-management plumbing)
+
+| key                | base  | smoke | full  |
+|--------------------|-------|-------|-------|
+| run_dir            | runs  | runs  | runs  |
+| log_every          | 1000  | 1000  | 1000  |
+| assert_improvement | false | false | false |
+
+## Scale-up path
+
+smoke → base (2M steps, hours on a laptop) → full (hidden 384, num_envs 32, 10M
+steps, overnight). Change one axis at a time; if reward collapses after a
+scale-up, the usual culprits are `seq_len` vs. episode structure and `lr`.
 
 ## Episodes
 
@@ -79,5 +143,5 @@ hash of the resolved config. The PPO trainer additionally stores (in `extra`):
 per-env world snapshots + seeds, the current recurrent hidden state, the previous
 done flags, and the reward history — enough to resume bit-identically. On
 `--resume`, the checkpoint's config hash is compared against the active config; a
-mismatch is an error unless `--allow-config-mismatch` is passed. SIGINT triggers a
-final checkpoint before exit.
+mismatch is an error unless `--allow-config-mismatch` is passed. SIGINT (and, on
+Windows, SIGBREAK/CTRL_BREAK_EVENT) triggers a final checkpoint before exit.

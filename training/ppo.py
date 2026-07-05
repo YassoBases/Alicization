@@ -69,7 +69,7 @@ def replay_core(
     ``embeds`` (T, B, E), ``h0`` (B, H) — the already-masked input hidden for
     the first step — and ``dones`` (T, B). The hidden state is zeroed AFTER any
     step where done=1, i.e. before it is used as the next step's input.
-    Returns per-step core outputs (T, B, H).
+    Returns per-step core outputs (T, B, core.output_dim).
     """
     h = h0
     outputs = []
@@ -81,16 +81,22 @@ def replay_core(
 
 
 class PPOModel(nn.Module):
-    """Encoder + recurrent core + actor-critic heads as one checkpointable module."""
+    """Encoder + recurrent core + actor-critic heads as one checkpointable module.
+
+    ``cfg["agent"]`` has no separate embedding-width key: the observation
+    embedding and the GRU input share one width, ``agent.hidden_size``, by
+    convention (see agent/encoder.py).
+    """
 
     def __init__(
         self, cfg: dict[str, Any], grid_channels: int, intero_dim: int, window: int
     ) -> None:
         super().__init__()
-        mcfg = cfg["model"]
-        self.encoder = ObsEncoder(mcfg, grid_channels, intero_dim, window)
-        self.core = GRUCore(mcfg, mcfg["obs_embed_dim"])
-        self.heads = ActorCritic(mcfg, mcfg["core_hidden"], NUM_ACTIONS)
+        acfg = cfg["agent"]
+        embed_dim = acfg["hidden_size"]
+        self.encoder = ObsEncoder(acfg, grid_channels, intero_dim, embed_dim, window)
+        self.core = GRUCore(acfg, input_dim=embed_dim)
+        self.heads = ActorCritic(acfg, self.core.output_dim, NUM_ACTIONS)
 
 
 class PPOTrainer:
@@ -114,7 +120,8 @@ class PPOTrainer:
         self.model = PPOModel(cfg, grid_c, self.vec.intero_dim, window).to(self.device)
         self.opt = torch.optim.Adam(self.model.parameters(), lr=self.pcfg["lr"], eps=1e-5)
 
-        n, hidden = self.pcfg["num_envs"], cfg["model"]["core_hidden"]
+        n = self.pcfg["num_envs"]
+        hidden = self.model.core.hidden_dim  # flat state size (layers * hidden_size)
         self._h = torch.zeros(n, hidden, device=self.device)
         self._done_prev = torch.zeros(n, device=self.device)
         self._obs = self.vec.observe()
@@ -126,14 +133,8 @@ class PPOTrainer:
         self._interrupted = False
 
         seq = self.pcfg["seq_len"]
-        if self.pcfg["rollout_length"] % seq != 0:
-            raise ValueError("ppo.rollout_length must be a multiple of ppo.seq_len")
-        samples = (self.pcfg["rollout_length"] // seq) * n
-        if samples % self.pcfg["num_minibatches"] != 0:
-            raise ValueError(
-                f"{samples} BPTT sequences per rollout not divisible by "
-                f"num_minibatches={self.pcfg['num_minibatches']}"
-            )
+        if self.pcfg["rollout_steps"] % seq != 0:
+            raise ValueError("ppo.rollout_steps must be a multiple of ppo.seq_len")
 
         self.run_dir = Path(run_dir) if run_dir is not None else None
         self.tb: TBLogger | None = None
@@ -152,7 +153,7 @@ class PPOTrainer:
     def collect_rollout(self) -> dict[str, torch.Tensor]:
         """Collect one on-policy rollout of shape (T, N, ...)."""
         p = self.pcfg
-        rollout_len, n, seq = p["rollout_length"], p["num_envs"], p["seq_len"]
+        rollout_len, n, seq = p["rollout_steps"], p["num_envs"], p["seq_len"]
         c, w, _ = self.vec.grid_shape
         dev = self.device
         buf = {
@@ -200,9 +201,14 @@ class PPOTrainer:
     # --------------------------------------------------------------- updates
 
     def update(self, buf: dict[str, torch.Tensor]) -> dict[str, float]:
-        """PPO epochs over BPTT segments; returns mean scalar metrics."""
+        """PPO epochs over BPTT segments; returns mean scalar metrics.
+
+        ``ppo.minibatch_transitions`` sizes minibatches in raw env-step units;
+        it is converted to a count of BPTT sequences here and need not divide
+        the rollout evenly (the last minibatch in an epoch may be smaller).
+        """
         p = self.pcfg
-        rollout_len, n, seq = p["rollout_length"], p["num_envs"], p["seq_len"]
+        rollout_len, n, seq = p["rollout_steps"], p["num_envs"], p["seq_len"]
         n_seg = rollout_len // seq
 
         adv = compute_gae(
@@ -219,11 +225,13 @@ class PPOTrainer:
                ("grid", "intero", "action", "logp", "done")}
         seg_adv, seg_ret, seg_val = by_segment(adv), by_segment(returns), by_segment(buf["value"])
 
-        n_samples = n_seg * n
-        mb_size = n_samples // p["num_minibatches"]
+        n_samples = n_seg * n  # number of BPTT sequences in this rollout
+        total_transitions = rollout_len * n
+        num_minibatches = max(1, min(n_samples, total_transitions // p["minibatch_transitions"]))
+        mb_size = max(1, n_samples // num_minibatches)
         amp = (
             torch.autocast(device_type=self.device.type, dtype=torch.bfloat16)
-            if p.get("amp_bf16")
+            if self.cfg.get("amp")
             else contextlib.nullcontext()
         )
         metrics = {k: 0.0 for k in
@@ -231,7 +239,7 @@ class PPOTrainer:
                     "approx_kl", "clip_frac")}
         n_mb = 0
 
-        for _ in range(p["update_epochs"]):
+        for _ in range(p["epochs"]):
             perm = torch.randperm(n_samples, device=self.device)
             for start in range(0, n_samples, mb_size):
                 idx = perm[start : start + mb_size]
@@ -263,9 +271,7 @@ class PPOTrainer:
                     logratio = new_logp - mb["logp"].reshape(-1)
                     ratio = logratio.exp()
                     pg1 = -mb_adv * ratio
-                    pg2 = -mb_adv * ratio.clamp(
-                        1.0 - p["clip_range"], 1.0 + p["clip_range"]
-                    )
+                    pg2 = -mb_adv * ratio.clamp(1.0 - p["clip"], 1.0 + p["clip"])
                     policy_loss = torch.max(pg1, pg2).mean()
 
                     if p.get("value_clip"):
@@ -292,7 +298,7 @@ class PPOTrainer:
                 with torch.no_grad():
                     metrics["approx_kl"] += ((ratio - 1.0) - logratio).mean().item()
                     metrics["clip_frac"] += (
-                        ((ratio - 1.0).abs() > p["clip_range"]).float().mean().item()
+                        ((ratio - 1.0).abs() > p["clip"]).float().mean().item()
                     )
                 metrics["loss/policy"] += policy_loss.item()
                 metrics["loss/value"] += value_loss.item()
@@ -310,7 +316,7 @@ class PPOTrainer:
         max_updates: int | None = None,
         allow_config_mismatch: bool = False,
     ) -> None:
-        """Run updates until ppo.total_env_steps (or ``max_updates``)."""
+        """Run updates until ppo.total_steps (or ``max_updates``)."""
         p = self.pcfg
         if resume_from is not None:
             self.load(resume_from, allow_config_mismatch=allow_config_mismatch)
@@ -331,11 +337,11 @@ class PPOTrainer:
             pass  # not in main thread (tests); signal handling skipped
 
         try:
-            while self.global_step < p["total_env_steps"]:
+            while self.global_step < p["total_steps"]:
                 if max_updates is not None and updates_done >= max_updates:
                     break
                 if p.get("anneal_lr"):
-                    frac = 1.0 - self.global_step / p["total_env_steps"]
+                    frac = 1.0 - self.global_step / p["total_steps"]
                     for group in self.opt.param_groups:
                         group["lr"] = lr0 * frac
 
@@ -347,7 +353,7 @@ class PPOTrainer:
                 reward_rollout = buf["reward"].sum(dim=0).mean().item()
                 self.reward_history.append(reward_rollout)
                 metrics["reward/rollout"] = reward_rollout
-                metrics["sps"] = p["rollout_length"] * p["num_envs"] / elapsed
+                metrics["sps"] = p["rollout_steps"] * p["num_envs"] / elapsed
                 self.last_metrics = metrics
                 if self.tb is not None:
                     for tag, val in metrics.items():
@@ -359,7 +365,7 @@ class PPOTrainer:
                         f"kl {metrics['approx_kl']:.4f}  sps {metrics['sps']:,.0f}"
                     )
 
-                interval = self.cfg["run"]["checkpoint_every"]
+                interval = self.cfg["checkpoints"]["interval"]
                 if (
                     self.run_dir is not None
                     and self.global_step - self._last_ckpt_step >= interval
@@ -375,7 +381,7 @@ class PPOTrainer:
             if self.tb is not None:
                 self.tb.flush()
 
-        completed = self.global_step >= p["total_env_steps"]
+        completed = self.global_step >= p["total_steps"]
         if self.cfg["run"].get("assert_improvement") and completed and not self._interrupted:
             self._assert_improvement()
 
@@ -412,7 +418,7 @@ class PPOTrainer:
             path, self.model, self.opt, self.global_step, self.cfg, extra=extra
         )
         self._last_ckpt_step = self.global_step
-        keep = self.cfg["run"].get("keep_last", 0)
+        keep = self.cfg["checkpoints"].get("keep_last", 0)
         if keep and out.parent.exists():
             prune_checkpoints(out.parent, keep)
         return out
