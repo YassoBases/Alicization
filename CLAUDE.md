@@ -33,6 +33,9 @@ policy as inputs.
 
 ## Commands
 - Run smoke training: python train.py --config configs/smoke.yaml
-- Run tests: pytest -x -q
+- Print a resolved config: python train.py --config configs/smoke.yaml --dry-run
+- Resume from checkpoint: python train.py --config <cfg> --resume <ckpt.pt>
+- Run tests: pytest -x -q (or make test)
+- Soak test (1M-tick random agent): python scripts/soak.py (or make soak)
 - Live viewer: python -m viz.viewer --run runs/latest
 - Dashboard: streamlit run viz/dashboard.py
