@@ -37,7 +37,7 @@ import torch
 import torch.nn.functional as F
 
 from agent.core_rssm import RSSMCore
-from agent.drives import NUM_PLANS, Arbiter, plan_action
+from agent.drives import NUM_PLANS, PLANS, Arbiter, plan_action
 from ledger.body_model import build_policy_features
 from ledger.forecaster import ForecastTupleStore, Forecaster, forecaster_nll, nmse
 from training.checkpoints import load_checkpoint, prune_checkpoints, save_checkpoint
@@ -174,6 +174,19 @@ class CircadianTrainer:
             self._pending: list[list[dict[str, Any]]] = [[] for _ in range(n)]
             n_terrain = cfg["world"]["terrain"]["num_types"]
             self._ch_food, self._ch_shelter = n_terrain, n_terrain + 2
+            # Stage-5b: per-env inspect targets (high importance x low
+            # reliability memory entries) and memory-trip bookkeeping for the
+            # stale-trip metric (a trip = navigating to a remembered food
+            # location; stale = arriving to find no food there).
+            self._inspect_targets: list[tuple[int, int] | None] = [None] * n
+            self._trip_targets: list[tuple[int, int] | None] = [None] * n
+            self._trip_ttl = np.zeros(n, dtype=np.int64)
+            self._trip_max_ticks: int = (lcfg.get("arbiter", {}) or {}).get(
+                "trip_max_ticks", 200
+            )
+            self.trip_count = 0
+            self.stale_trip_count = 0
+            self._arbiter_ticks = 0
             self._inner.action_fn = self._arbiter_action_fn
         elif self.controller != "actor":
             raise ValueError(f"unknown agent.controller: {self.controller!r}")
@@ -190,19 +203,25 @@ class CircadianTrainer:
 
     # ------------------------------------------------------------------ wake
 
-    def _policy_fn(self, core_features: torch.Tensor):
+    def _sleep_features(self, core_features: torch.Tensor) -> torch.Tensor:
+        """Policy-input features for imagined states: body-model features plus
+        a ZERO memory summary (imagined states have no position to query the
+        episodic store with). Known input-distribution mismatch vs wake,
+        accepted for the prototype. Every sleep-phase consumer of the heads
+        must build features through here so dims always match the wake path.
+        """
         feats, _ = build_policy_features(
             core_features, self._inner.body_model, self.model.use_ledger_features
         )
         if self._inner.memory_enabled:
-            # Imagination does not query episodic memory (imagined states have
-            # no position): a zero summary stands in. Known input-distribution
-            # mismatch vs wake, accepted for the prototype.
             feats = torch.cat(
                 [feats, torch.zeros(feats.shape[0], self.model.memory_dim,
                                     device=feats.device)], dim=-1,
             )
-        return self.model.heads(feats)
+        return feats
+
+    def _policy_fn(self, core_features: torch.Tensor):
+        return self.model.heads(self._sleep_features(core_features))
 
     @torch.no_grad()
     def wake_phase(self, num_ticks: int) -> dict[str, float]:
@@ -224,6 +243,7 @@ class CircadianTrainer:
             with torch.enable_grad():
                 ledger_metrics.update(inner.update_body_model(buf))
                 ledger_metrics.update(inner.update_attribution_model(buf))
+                ledger_metrics.update(inner.update_reliability_model())
             for t in range(rollout_len):
                 self.replay.add_batch(
                     buf["grid"][t].cpu().numpy(),
@@ -231,13 +251,21 @@ class CircadianTrainer:
                     buf["action"][t].cpu().numpy(),
                     buf["reward"][t].cpu().numpy(),
                     buf["done"][t].cpu().numpy(),
+                    position=buf["position"][t].cpu().numpy(),
                 )
             reward_sum += buf["reward"].sum(dim=0).mean().item()
             ticks_done += rollout_len * n
             self.env_steps += rollout_len * n
         reward_mean = reward_sum / max(1, ticks_done // (rollout_len * n))
         self.reward_history.append(reward_mean)
-        return {"reward/rollout": reward_mean, **ledger_metrics}
+        metrics = {"reward/rollout": reward_mean, **ledger_metrics}
+        if self.controller == "arbiter" and self._arbiter_ticks > 0:
+            metrics["memory/trips"] = float(self.trip_count)
+            metrics["memory/stale_trips"] = float(self.stale_trip_count)
+            metrics["memory/stale_trip_rate_per_1k"] = (
+                1000.0 * self.stale_trip_count / self._arbiter_ticks
+            )
+        return metrics
 
     # --------------------------------------------------------------- arbiter
 
@@ -275,10 +303,22 @@ class CircadianTrainer:
                     still.append(entry)
             self._pending[i] = still
 
+        # Refresh inspect targets (stage-5b): the entry with the highest
+        # importance x (1 - predicted reliability); None disables the plan.
+        inspect_id = PLANS.index("inspect")
+        for i in range(n):
+            self._inspect_targets[i] = self._pick_inspect_target(i)
+        allowed = np.ones((n, NUM_PLANS), dtype=bool)
+        for i in range(n):
+            allowed[i, inspect_id] = self._inspect_targets[i] is not None
+
         # Re-select plans every plan_commit_ticks (or after a boundary).
         need = self._plan_age >= self._plan_commit
         if need.any():
-            fresh = self.arbiter.select_plans(h_det)
+            fresh = self.arbiter.select_plans(h_det, allowed=allowed)
+            changed = need & (fresh != self._plans)
+            for i in np.nonzero(changed)[0]:
+                self._trip_targets[i] = None  # plan switch abandons the trip
             self._plans[need] = fresh[need]
             self._plan_age[need] = 0
         self._plan_age += 1
@@ -293,15 +333,117 @@ class CircadianTrainer:
         # Execute the committed plan on the CURRENT observation.
         grid_np = inner._obs["grid"]
         actions = np.zeros(n, dtype=np.int64)
+        self._arbiter_ticks += n
         for i in range(n):
             pos = None
             if inner._last_infos is not None and done_prev[i] == 0:
                 pos = tuple(inner._last_infos[i]["pos"])
+            plan = int(self._plans[i])
+            target = None
+            if PLANS[plan] == "inspect":
+                target = self._inspect_targets[i]
+            elif PLANS[plan] == "forage_nearest" and pos is not None:
+                target = self._forage_memory_target(i, grid_np[i], pos, done_prev[i])
             actions[i] = plan_action(
-                int(self._plans[i]), grid_np[i], self._ch_food, self._ch_shelter,
+                plan, grid_np[i], self._ch_food, self._ch_shelter,
                 self._exec_rng, epistemic_map=inner.epistemic_map, pos=pos,
+                target_pos=target,
             )
         return torch.from_numpy(actions)
+
+    def _pick_inspect_target(self, env: int) -> tuple[int, int] | None:
+        """High-importance, low-reliability entry -> revisit target."""
+        rel = self._inner.reliability
+        mem = self._inner.memories[env] if self._inner.memories else None
+        if rel is None or not rel.enabled or mem is None or mem.size == 0:
+            return None
+        if rel.n_verifications == 0:
+            return None
+        now = self._inner._last_tick[env]
+        fn = self._inner._reliability_fn(env)
+        if fn is None:
+            return None
+        idx = np.arange(mem.size)
+        need = mem.importance(now) * (1.0 - fn(idx))
+        j = int(np.argmax(need))
+        return int(mem.positions[j][0]), int(mem.positions[j][1])
+
+    def _forage_memory_target(
+        self, env: int, grid: np.ndarray, pos: tuple[int, int], done_prev: float
+    ) -> tuple[int, int] | None:
+        """Memory-guided foraging + the stale-trip metric.
+
+        With no food visible, head for the best-scoring remembered food
+        location (reliability-weighted unless ablated). A trip PERSISTS until
+        reached (visible food en route is an eat-detour, not an abandonment —
+        clearing on sight would leave only doomed trips completable and force
+        the stale rate to 100% by construction), a TTL expiry, a plan change,
+        or an episode boundary. Arriving within r<=1 completes it; it is
+        STALE when the remembered cell holds no food.
+        """
+        inner = self._inner
+        mem = inner.memories[env] if inner.memories else None
+        if mem is None:
+            return None
+        if done_prev > 0:
+            self._trip_targets[env] = None
+            return None
+        window = grid.shape[1]
+        center = window // 2
+        food_visible = bool(grid[self._ch_food].any())
+
+        target = self._trip_targets[env]
+        vis = center  # window half-width: how far the agent can see
+        if target is not None:
+            self._trip_ttl[env] -= 1
+            dx, dy = target[0] - pos[0], target[1] - pos[1]
+            if max(abs(dx), abs(dy)) <= vis:
+                # Trip completes at FIRST VISIBILITY of the target cell — the
+                # earliest moment the memory can be judged. (Completing on
+                # arrival instead means a CORRECT memory gets eaten en route
+                # and the check finds the cell empty: ~100% "stale" by
+                # construction.)
+                self.trip_count += 1
+                if not grid[self._ch_food, center + dy, center + dx]:
+                    self.stale_trip_count += 1
+                self._trip_targets[env] = None
+            elif self._trip_ttl[env] <= 0:  # lost/undoable: abandon uncounted
+                self._trip_targets[env] = None
+            elif food_visible:
+                return None  # executor eats what it sees; trip stays open
+            else:
+                return target
+
+        if food_visible:
+            return None
+        if self._trip_targets[env] is None and mem.size > 0:
+            # Choose the best remembered FOOD location by retrieval score
+            # (x reliability unless the ablation flag disabled it). The trip
+            # target is the remembered food CELL itself — entry position plus
+            # the stored window offset of its nearest food cell — NOT the
+            # position the agent happened to stand at when writing (checking
+            # staleness at the write position measured food at a cell that
+            # usually never had any, forcing ~100% stale rates).
+            has_food = np.array([
+                s is not None and bool(s["food"].any())
+                for s in mem.summaries[: mem.size]
+            ])
+            if has_food.any():
+                q = mem.project(inner._h[env].detach().cpu().numpy())
+                scores = mem.scores(q, pos, reliability_fn=inner._reliability_fn(env))
+                scores = np.where(has_food, scores, -np.inf)
+                j = int(np.argmax(scores))
+                summary = mem.summaries[j]
+                assert summary is not None
+                ys, xs = np.nonzero(summary["food"])
+                c = summary["food"].shape[0] // 2
+                k = int(np.argmin(np.abs(xs - c) + np.abs(ys - c)))
+                size = self._inner.epistemic_map.shape[0]
+                tx = int(np.clip(mem.positions[j][0] + (xs[k] - c), 0, size - 1))
+                ty = int(np.clip(mem.positions[j][1] + (ys[k] - c), 0, size - 1))
+                self._trip_targets[env] = (tx, ty)
+                self._trip_ttl[env] = self._trip_max_ticks
+        return self._trip_targets[env]
 
     def _forecaster_sleep_step(self) -> dict[str, float]:
         """NLL grad steps on stored tuples + NMSE-vs-identity evaluation."""
@@ -360,6 +502,7 @@ class CircadianTrainer:
             wm = core.world_model_loss(
                 embeds, h0, batch["done"], batch["action"],
                 batch["grid"], batch["intero"], rewards=batch["reward"],
+                positions=batch["position"],
             )
             self.world_opt.zero_grad()
             wm["total"].backward()
@@ -386,9 +529,7 @@ class CircadianTrainer:
             feats_im = imag["features"]  # (H, B', F) — carries world-model graph
             with torch.no_grad():
                 flat_im = feats_im.reshape(-1, feats_im.shape[-1])
-                pf, _ = build_policy_features(
-                    flat_im, self._inner.body_model, self.model.use_ledger_features
-                )
+                pf = self._sleep_features(flat_im)
                 v_target = self.target_critic(pf).squeeze(-1).reshape(feats_im.shape[0], -1)
             returns = lambda_returns(
                 imag["reward"].detach(), v_target, v_target[-1], gamma, lam
@@ -404,10 +545,7 @@ class CircadianTrainer:
                 adv = (adv - adv.mean()) / (adv.std() + 1e-8)
             actor_loss = -(imag["logp"] * adv).mean() - ent_coef * imag["entropy"].mean()
             # Critic trains on detached imagined features (no world-model grads).
-            pf_c, _ = build_policy_features(
-                feats_im.detach().reshape(-1, feats_im.shape[-1]),
-                self._inner.body_model, self.model.use_ledger_features,
-            )
+            pf_c = self._sleep_features(feats_im.detach().reshape(-1, feats_im.shape[-1]))
             v_pred = self.model.heads.v(pf_c).squeeze(-1).reshape(feats_im.shape[0], -1)
             critic_loss = F.mse_loss(v_pred, returns.detach())
 

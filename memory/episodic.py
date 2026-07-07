@@ -106,6 +106,7 @@ class EpisodicMemory:
         # ego window) for stage-5b verification; list of small dicts.
         self.summaries: list[dict[str, np.ndarray] | None] = [None] * self.capacity
         self.revisit_counts = np.zeros(self.capacity, dtype=np.int64)
+        self.last_verified = np.zeros(self.capacity, dtype=np.int64)  # tick of last check
         self.size = 0
 
     # ---------------------------------------------------------------- writes
@@ -147,6 +148,7 @@ class EpisodicMemory:
         self.surprises[i] = surprise
         self.summaries[i] = summary
         self.revisit_counts[i] = 0
+        self.last_verified[i] = tick
 
     # ------------------------------------------------------------- retrieval
 
@@ -207,6 +209,7 @@ class EpisodicMemory:
         self.surprises[: len(keep)] = self.surprises[keep]
         self.summaries[: len(keep)] = [self.summaries[j] for j in keep]
         self.revisit_counts[: len(keep)] = self.revisit_counts[keep]
+        self.last_verified[: len(keep)] = self.last_verified[keep]
         dropped = self.size - len(keep)
         self.size = len(keep)
         return dropped
@@ -228,6 +231,7 @@ class EpisodicMemory:
             "ticks": self.ticks.copy(), "surprises": self.surprises.copy(),
             "summaries": list(self.summaries),
             "revisit_counts": self.revisit_counts.copy(),
+            "last_verified": self.last_verified.copy(),
             "size": self.size, "gate": self.gate.state_dict(),
             "projection": self.projection.copy(),
         }
@@ -239,6 +243,9 @@ class EpisodicMemory:
         self.surprises = state["surprises"].copy()
         self.summaries = list(state["summaries"])
         self.revisit_counts = state["revisit_counts"].copy()
+        self.last_verified = state.get(
+            "last_verified", np.zeros(self.capacity, dtype=np.int64)
+        ).copy()
         self.size = state["size"]
         self.gate.load_state_dict(state["gate"])
         self.projection = state["projection"].copy()

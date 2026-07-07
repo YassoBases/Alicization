@@ -118,6 +118,17 @@ ledger:
     setpoint_fatigue: 0.0
     weight_energy: 1.0
     weight_fatigue: 0.25
+  reliability:                 # additive: stage-5b memory reliability
+    enabled: true              # false = reliability-blind ablation (verification
+                               # still runs; predictions influence nothing)
+    lr: 1.0e-3
+    age_tau: 5000
+    radius: 2                  # revisit distance (Chebyshev) for verification
+    min_age: 50                # don't verify entries younger than this
+    verify_cooldown: 25        # ticks between re-verifications of one entry
+    queue_capacity: 5000
+    region_size: 8             # volatility-estimate grid granularity
+    volatility_ema: 0.05
   attribution:                 # stage-3b: self/world/both classifier, wired into training
     tau_pos: 0.5                # Manhattan-distance residual threshold (DPOS_CLASSES vectors)
     tau_energy: 0.03             # |denergy| residual threshold; empirically, ordinary
@@ -125,6 +136,14 @@ ledger:
     # on configs/smoke.yaml at 40k ticks) — tau_energy must clear that noise floor or
     # the classifier collapses to always-WORLD. Re-measure if body_hidden/lr change.
     lr: 1.0e-3
+
+mirror:                       # additive (stage-6a): self-state divergence monitor
+  enabled: false               # gates responses only; divergence is ALWAYS
+                               # logged under rssm (monitored, never minimized)
+  threshold: 3.0               # cells; crossing triggers probe + MPC
+  mpc_ticks: 4
+  mpc_horizon: 6
+  mpc_candidates: 64
 
 memory:                       # additive (stage-5a): episodic memory
   enabled: false               # requires agent.core: rssm (KL write gate)

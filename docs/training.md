@@ -186,6 +186,67 @@ trains a Ledger head can import it). `PPOTrainer.write_report()` writes the
 cumulative accuracy, a self/world/both confusion matrix, and the
 noop-attributed-to-self violation count (must be 0) to `run_dir/report.md`.
 
+### `memory` (additive; stage-5a episodic memory)
+
+| key               | value  |
+|-------------------|--------|
+| enabled           | false (requires `agent.core: rssm`) |
+| capacity          | 2000 per env |
+| latent_dim        | 32 (frozen random projection of the core state) |
+| write_rate_target | 0.005 (~1 write / 200 ticks, controller-adjusted) |
+| gate_eta          | 0.05  |
+| retrieve_k        | 4     |
+| w_sim / w_spatial | 1.0 / 1.0 |
+| spatial_sigma     | 8.0   |
+| importance_tau    | 20000 (recency decay for pruning) |
+
+Writes gate on RSSM KL-surprise against a threshold controlled toward the
+target rate (scale-free multiplicative controller — tracks the shrinking
+surprise distribution as the world model sharpens). Retrieval: top-k by
+`cos_sim * w_sim + Gaussian(pos) * w_spatial`, times predicted reliability
+when stage-5b is enabled; the top-k mean latent joins the policy input
+detached, and buffered summaries are replayed (not recomputed) in PPO
+updates. Fill fraction feeds the intero `memory_pressure` slot. Pruning
+(sleep, or forced on full writes) drops lowest `surprise * exp(-age/tau)`.
+Memories are per-env and cleared at episode boundaries.
+
+`ledger.reliability` (additive; stage-5b): logistic regression over
+`[age_norm, surprise_at_write, revisit_count_norm, local_volatility]` ->
+P(memory still matches the world). Verification: revisiting within
+`radius`=2 of a stored entry compares its stored food/water window summary
+to the live observation (overlap-aligned) -> match label in [0,1]; labels
+also update a per-8x8-region running mismatch rate — the agent's OWN
+volatility estimate, never read from lever config (an AST test bans lever
+imports across ledger/, agent/, memory/). Retrieval scores multiply by
+predicted reliability; the arbiter gains an `inspect` plan targeting the
+highest `importance x (1 - reliability)` entry. `enabled: false` is the
+reliability-blind ablation (verification still runs; predictions influence
+nothing). `scripts/verify_reliability.py` reports fitted decay curves per
+region, 10-bin ECE, and stale-trip rate vs the ablation.
+
+### `mirror` (additive; stage-6a self-state divergence monitor)
+
+| key            | value |
+|----------------|-------|
+| enabled        | false (gates RESPONSES only; divergence always logged under rssm) |
+| threshold      | 3.0 cells |
+| mpc_ticks      | 4     |
+| mpc_horizon    | 6     |
+| mpc_candidates | 64    |
+
+The RSSM decoder gains an allocentric pose head — `(state, action) ->`
+normalized post-action agent position, trained inside the world-prediction
+loss (`rssm.pose_scale`, additive, default 1.0). Divergence = distance in
+cells between that decoder-implied position and the body-model-implied one
+(predicted dpos anchored at proprioception). It is MONITORED, NEVER
+MINIMIZED: computed under no_grad, returned as numpy, structurally unable to
+enter a loss (tested). Threshold crossing triggers a 4-action self-check
+probe (known expected outcomes; results immediately refresh the body model)
+then a few ticks of random-shooting MPC through the RSSM prior.
+`scripts/verify_mirror.py` runs the kidnapped-agent test: teleport during
+sleep, divergence must spike within 20 ticks of waking; relocalization time
+reported vs the no-mirror ablation.
+
 ### `checkpoints`
 
 | key      | base   | smoke | full    |

@@ -25,7 +25,7 @@ _MOVE_N, _MOVE_S, _MOVE_E, _MOVE_W = 0, 1, 2, 3
 _EAT, _REST, _NOOP = 4, 5, 8
 
 PLANS: tuple[str, ...] = (
-    "forage_nearest", "explore_high_epistemic", "rest", "goto_shelter"
+    "forage_nearest", "explore_high_epistemic", "rest", "goto_shelter", "inspect"
 )
 NUM_PLANS = len(PLANS)
 
@@ -91,6 +91,7 @@ def plan_action(
     rng: np.random.Generator,
     epistemic_map: np.ndarray | None = None,
     pos: tuple[int, int] | None = None,
+    target_pos: tuple[int, int] | None = None,
 ) -> int:
     """One primitive action for ``plan`` given the egocentric grid window.
 
@@ -98,14 +99,33 @@ def plan_action(
     agent's OWN running estimate of ensemble disagreement by position (an
     internal estimate, not privileged world state); ``pos`` is its current
     coordinate. Without them, explore degrades to a uniform random move.
+
+    ``target_pos`` is a navigation target from the agent's own episodic
+    memory: the inspect plan's revisit target, or a remembered food location
+    when foraging with nothing visible in the window.
     """
     name = PLANS[plan]
     if name == "rest":
         return _REST
 
+    if name == "inspect":
+        # Walk to the memory entry under verification; linger on arrival
+        # (the revisit itself triggers the reliability check).
+        if target_pos is None or pos is None:
+            return _NOOP
+        dx, dy = target_pos[0] - pos[0], target_pos[1] - pos[1]
+        if max(abs(dx), abs(dy)) <= 1:
+            return _REST
+        return _move_toward(dx, dy, rng)
+
     if name == "forage_nearest":
         rel = _nearest_in_channel(grid, ch_food)
         if rel is None:
+            if target_pos is not None and pos is not None:
+                # Nothing visible: head for a remembered food location.
+                dx, dy = target_pos[0] - pos[0], target_pos[1] - pos[1]
+                if (dx, dy) != (0, 0):
+                    return _move_toward(dx, dy, rng)
             return int((_MOVE_N, _MOVE_S, _MOVE_E, _MOVE_W)[rng.integers(4)])
         if rel == (0, 0):
             return _EAT
@@ -160,8 +180,15 @@ class Arbiter:
         self.rng = np.random.default_rng(seed)
 
     @torch.no_grad()
-    def select_plans(self, h_detached: torch.Tensor) -> np.ndarray:
-        """(B, core_dim) detached -> (B,) plan ids."""
+    def select_plans(
+        self, h_detached: torch.Tensor, allowed: np.ndarray | None = None
+    ) -> np.ndarray:
+        """(B, core_dim) detached -> (B,) plan ids.
+
+        ``allowed`` (B, NUM_PLANS) bool masks plans that are currently
+        impossible (e.g. inspect with no revisit target); both the greedy
+        pick and epsilon-exploration respect it.
+        """
         b = h_detached.shape[0]
         scores = np.zeros((b, NUM_PLANS))
         for plan in range(NUM_PLANS):
@@ -173,7 +200,14 @@ class Arbiter:
                 scores[i, plan] = -drive_error(
                     float(mean[i, _ENERGY]), float(mean[i, _FATIGUE]), self.cfg
                 )
+        if allowed is not None:
+            scores = np.where(allowed, scores, -np.inf)
         plans = scores.argmax(axis=1)
         explore = self.rng.random(b) < self.epsilon
-        plans[explore] = self.rng.integers(0, NUM_PLANS, size=int(explore.sum()))
+        for i in np.nonzero(explore)[0]:
+            options = (
+                np.nonzero(allowed[i])[0] if allowed is not None
+                else np.arange(NUM_PLANS)
+            )
+            plans[i] = int(options[self.rng.integers(len(options))])
         return plans

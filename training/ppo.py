@@ -44,6 +44,8 @@ from ledger.body_model import (
 from training.attribution_eval import AttributionAccuracyTracker, ground_truth_label
 from training.checkpoints import load_checkpoint, prune_checkpoints, save_checkpoint
 from training.loggers import TBLogger
+from ledger.mirror import PROBING, MirrorMonitor
+from ledger.reliability import ReliabilityModel, compare_summaries
 from memory.episodic import EpisodicMemory
 from training.monitors import ParticipationRatioMonitor
 from training.vecenv import VecWorld
@@ -220,9 +222,32 @@ class PPOTrainer:
         self._last_pos: list[tuple[int, int]] = [
             (w.agents[0].x, w.agents[0].y) for w in self.vec.worlds
         ]
+        self._last_tick: list[int] = [0] * n
         self._mem_summary = torch.zeros(n, self.model.memory_dim, device=self.device)
         n_terrain = cfg["world"]["terrain"]["num_types"]
         self._ch_food, self._ch_water = n_terrain, n_terrain + 1
+
+        # Memory-reliability model (stage-5b): pooled across envs — every env
+        # world shares the same config (and so the same volatility layout);
+        # pooling multiplies verification data. Verification ALWAYS runs when
+        # memory is on (so ablation comparisons share a data pipeline);
+        # ledger.reliability.enabled=false only stops predictions from
+        # influencing retrieval/planning (the reliability-blind ablation).
+        self.reliability: ReliabilityModel | None = None
+        if self.memory_enabled:
+            rel_cfg = cfg["ledger"].get("reliability", {}) or {}
+            self.reliability = ReliabilityModel(rel_cfg, cfg["world"]["size"])
+
+        # Mirror monitor (stage-6a): divergence between decoder-implied and
+        # body-model-implied self-state. ALWAYS computed/logged under RSSM
+        # (it is monitoring, never a loss term); ``mirror.enabled`` gates only
+        # the responses (probe routine + MPC deliberation).
+        self.mirror: MirrorMonitor | None = None
+        if self.is_rssm:
+            self.mirror = MirrorMonitor(
+                cfg.get("mirror", {}) or {}, num_envs=n,
+                world_size=cfg["world"]["size"],
+            )
         world_size = cfg["world"]["size"]
         self.epistemic_map = np.zeros((world_size, world_size), dtype=np.float64)
         self.epistemic_count = np.zeros((world_size, world_size), dtype=np.int64)
@@ -265,13 +290,81 @@ class PPOTrainer:
             )
         return grid, intero
 
+    def _reliability_fn(self, env: int):
+        """Retrieval-score multiplier for env's store; None when the model is
+        disabled (the reliability-blind ablation) or has never verified."""
+        rel = self.reliability
+        if rel is None or not rel.enabled or rel.n_verifications == 0:
+            return None
+        mem = self.memories[env]
+        now = self._last_tick[env]
+
+        def fn(idx: np.ndarray) -> np.ndarray:
+            feats = rel.features(
+                age=(now - mem.ticks[idx]).astype(np.float64),
+                surprise=mem.surprises[idx].astype(np.float64),
+                revisits=mem.revisit_counts[idx].astype(np.float64),
+                positions=mem.positions[idx],
+            )
+            return rel.predict(feats)
+
+        return fn
+
     def _mem_retrieve(self, core_out: torch.Tensor) -> torch.Tensor:
         """Per-env top-k retrieval summaries, (N, memory_dim), detached."""
         rows = [
-            mem.retrieve(core_out[i].detach().cpu().numpy(), self._last_pos[i])[0]
+            mem.retrieve(
+                core_out[i].detach().cpu().numpy(), self._last_pos[i],
+                reliability_fn=self._reliability_fn(i),
+            )[0]
             for i, mem in enumerate(self.memories)
         ]
         return torch.from_numpy(np.stack(rows)).to(self.device)
+
+    def _verify_memories(
+        self, infos: list[dict[str, Any]], obs: dict[str, np.ndarray]
+    ) -> None:
+        """Revisit verification (stage-5b): when an env stands within
+        ``radius`` of a stored entry, compare its stored food/water summary
+        against the CURRENT observation and record the match label."""
+        rel = self.reliability
+        assert rel is not None
+        for i, (info, mem) in enumerate(zip(infos, self.memories)):
+            if mem.size == 0:
+                continue
+            pos = np.asarray(info["pos"])
+            tick = info["tick"]
+            d = np.abs(mem.positions[: mem.size] - pos).max(axis=1)  # Chebyshev
+            eligible = (
+                (d <= rel.radius)
+                & (tick - mem.ticks[: mem.size] >= rel.min_age)
+                & (tick - mem.last_verified[: mem.size] >= rel.verify_cooldown)
+            )
+            candidates = np.nonzero(eligible)[0]
+            if len(candidates) == 0:
+                continue
+            j = int(candidates[np.argmin(d[candidates])])  # nearest eligible
+            stored = mem.summaries[j]
+            if stored is None:
+                continue
+            observed = {
+                "food": obs["grid"][i][self._ch_food].astype(bool),
+                "water": obs["grid"][i][self._ch_water].astype(bool),
+            }
+            offset = (int(pos[0] - mem.positions[j][0]), int(pos[1] - mem.positions[j][1]))
+            label = compare_summaries(stored, observed, offset)
+            if label is None:
+                continue
+            feats = rel.features(
+                age=np.array([tick - mem.ticks[j]], dtype=np.float64),
+                surprise=np.array([mem.surprises[j]], dtype=np.float64),
+                revisits=np.array([mem.revisit_counts[j]], dtype=np.float64),
+                positions=mem.positions[j : j + 1],
+            )[0]
+            entry_pos = (int(mem.positions[j][0]), int(mem.positions[j][1]))
+            rel.record(feats, label, entry_pos)
+            mem.revisit_counts[j] += 1
+            mem.last_verified[j] = tick
 
     def _mem_write_summary(self, grid_np: np.ndarray) -> dict[str, np.ndarray]:
         """Local food/water bitmaps of the ego window (stage-5b verification)."""
@@ -319,7 +412,9 @@ class PPOTrainer:
             "pred_denergy": torch.zeros(rollout_len, n, device=dev),
             "ground_truth_label": torch.zeros(rollout_len, n, dtype=torch.long, device=dev),
             "mem_summary": torch.zeros(rollout_len, n, self.model.memory_dim, device=dev),
+            "position": torch.zeros(rollout_len, n, 2, device=dev),  # normalized, post-action
         }
+        world_size = float(self.cfg["world"]["size"])
         for t in range(rollout_len):
             h_in = self._h * (1.0 - self._done_prev).unsqueeze(-1)
             if t % seq == 0:
@@ -344,6 +439,21 @@ class PPOTrainer:
             else:
                 action = dist.sample()
 
+            if self.mirror is not None:
+                # Divergence is MONITORED (no_grad, numpy), never minimized.
+                div = self.mirror.divergence(
+                    self.model.core, self.body_model, out, action, self._last_pos
+                )
+                self.mirror.step_state(div)
+                for env in np.nonzero(self.mirror.just_finished_probing)[0]:
+                    refresh_loss = self.mirror.refresh_body_model(
+                        self.body_model, self.body_opt, int(env)
+                    )
+                    del refresh_loss  # logged via mirror trigger count instead
+                action = self.mirror.override_actions(
+                    action, self.model.core, self.body_model, out
+                )
+
             obs, rewards, dones, infos = self.vec.step(action.cpu().numpy())
             buf["grid"][t] = grid
             buf["intero"][t] = intero
@@ -366,6 +476,18 @@ class PPOTrainer:
             action_idx = action.unsqueeze(-1)
             buf["pred_dpos_class"][t] = body_out["dpos_class"].gather(1, action_idx).squeeze(-1)
             buf["pred_denergy"][t] = body_out["denergy"].gather(1, action_idx).squeeze(-1)
+            buf["position"][t] = torch.tensor(
+                [info["pos"] for info in infos], dtype=torch.float32, device=dev
+            ) / world_size
+            if self.mirror is not None:
+                for env in np.nonzero(self.mirror.state == PROBING)[0]:
+                    info = infos[env]
+                    self.mirror.record_probe_result(
+                        int(env), out[env].detach(), int(action[env]),
+                        int(buf["real_dpos_class"][t, env]),
+                        float(info["realized"]["success"]),
+                        float(info["realized"]["denergy"]),
+                    )
             if self.is_rssm:
                 onehot = torch.nn.functional.one_hot(action, NUM_ACTIONS).float()
                 _, epistemic, aleatoric = self.model.core.ensemble_stats(out, onehot)
@@ -403,11 +525,13 @@ class PPOTrainer:
                         float(mem_surprise[i]),
                         summary=self._mem_write_summary(grid_np[i]),
                     )
+                self._verify_memories(infos, obs)
             self._h = h_new
             self._done_prev = buf["done"][t]
             self._obs = obs
             self._last_infos = infos
             self._last_pos = [tuple(info["pos"]) for info in infos]
+            self._last_tick = [info["tick"] for info in infos]
 
         # Bootstrap value for GAE (masked hidden; unused across dones anyway).
         h_in = self._h * (1.0 - self._done_prev).unsqueeze(-1)
@@ -448,6 +572,8 @@ class PPOTrainer:
         seg_keys = ["grid", "intero", "action", "logp", "done", "reward"]
         if self.memory_enabled:
             seg_keys.append("mem_summary")
+        if self.is_rssm:
+            seg_keys.append("position")
         seg = {k: by_segment(buf[k]) for k in seg_keys}
         seg_adv, seg_ret, seg_val = by_segment(adv), by_segment(returns), by_segment(buf["value"])
 
@@ -541,6 +667,7 @@ class PPOTrainer:
                             mb["grid"],
                             mb["intero"],
                             rewards=mb["reward"],
+                            positions=mb["position"],
                         )
                         loss = loss + wm["total"]
                         metrics["rssm/recon"] += (
@@ -648,6 +775,22 @@ class PPOTrainer:
             "ledger/attribution_accuracy_ema": self._attr_accuracy_ema.update(rollout_accuracy),
         }
 
+    # ------------------------------------------------------------ reliability
+
+    def update_reliability_model(self) -> dict[str, float]:
+        """One online BCE step on queued verifications (ledger.online_updates
+        covers body + reliability). Called once per rollout by BOTH training
+        loops — PPOTrainer.train and CircadianTrainer.wake_phase."""
+        if self.reliability is None:
+            return {}
+        metrics: dict[str, float] = {
+            "ledger/reliability_verifications": float(self.reliability.n_verifications)
+        }
+        bce = self.reliability.train_step()
+        if bce is not None:
+            metrics["ledger/reliability_bce"] = bce
+        return metrics
+
     # ----------------------------------------------------------------- train
 
     def train(
@@ -695,6 +838,11 @@ class PPOTrainer:
                     metrics["rssm/aleatoric"] = self._aleatoric_sum / self._uncert_n
                     if self.pr_history:
                         metrics["rssm/participation_ratio"] = self.pr_history[-1]
+                if self.mirror is not None and self.mirror.divergence_history:
+                    recent = np.concatenate(self.mirror.divergence_history[-64:])
+                    metrics["mirror/divergence"] = float(recent.mean())
+                    metrics["mirror/divergence_max"] = float(recent.max())
+                    metrics["mirror/triggers"] = float(self.mirror.trigger_count)
                 if self.memory_enabled:
                     metrics["memory/pressure"] = float(
                         np.mean([m.pressure() for m in self.memories])
@@ -705,6 +853,7 @@ class PPOTrainer:
                     metrics["memory/gate_threshold"] = float(
                         np.mean([m.gate.threshold for m in self.memories])
                     )
+                metrics.update(self.update_reliability_model())
                 elapsed = time.perf_counter() - t0
 
                 reward_rollout = buf["reward"].sum(dim=0).mean().item()
@@ -834,6 +983,11 @@ class PPOTrainer:
             "pr_history": list(self.pr_history),
             "memories": [m.state_dict() for m in self.memories],
             "last_pos": list(self._last_pos),
+            "last_tick": list(self._last_tick),
+            "reliability_state": (
+                self.reliability.reliability_state_dict()
+                if self.reliability is not None else None
+            ),
         }
         out = save_checkpoint(
             path, self.model, self.opt, self.global_step, self.cfg, extra=extra
@@ -881,4 +1035,8 @@ class PPOTrainer:
             mem.load_state_dict(state)
         if "last_pos" in ckpt.extra:
             self._last_pos = [tuple(p) for p in ckpt.extra["last_pos"]]
+        if "last_tick" in ckpt.extra:
+            self._last_tick = list(ckpt.extra["last_tick"])
+        if self.reliability is not None and ckpt.extra.get("reliability_state"):
+            self.reliability.load_reliability_state_dict(ckpt.extra["reliability_state"])
         self._obs = self.vec.observe()

@@ -61,6 +61,7 @@ class RSSMCore(nn.Module):
         self.recon_scale: float = cfg.get("recon_scale", 1.0)
         self.ensemble_scale: float = cfg.get("ensemble_scale", 1.0)
         self.reward_scale: float = cfg.get("reward_scale", 1.0)
+        self.pose_scale: float = cfg.get("pose_scale", 1.0)
         self.grid_shape = grid_shape
         self.intero_dim = intero_dim
         self.num_actions = num_actions
@@ -75,6 +76,12 @@ class RSSMCore(nn.Module):
         self.decoder_grid = _mlp(self.output_dim, hidden, grid_flat)
         self.decoder_intero = _mlp(self.output_dim, hidden, intero_dim)
         self.reward_head = _mlp(self.output_dim, hidden, 1)
+        # Allocentric agent-as-object pose head (stage-6a): predicts the
+        # agent's NEXT-step normalized (x, y) from (state, action). Part of
+        # the world-prediction loss; its output feeds the mirror's divergence
+        # MONITOR (ledger/mirror.py) — monitored, never minimized as a
+        # divergence.
+        self.decoder_pose = _mlp(self.output_dim + num_actions, hidden, 2)
 
         k = cfg.get("ensemble_k", 4)
         self.ensemble = nn.ModuleList(
@@ -215,13 +222,15 @@ class RSSMCore(nn.Module):
         grid_target: torch.Tensor,
         intero_target: torch.Tensor,
         rewards: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """Full world-prediction loss over a (T, B) segment.
 
         ``grid_target`` (T, B, C, W, W), ``intero_target`` (T, B, D),
-        ``actions`` (T, B) long, ``rewards`` (T, B) optional. Ensemble targets
-        are the next step's embedding (detached; masked where a done breaks
-        the transition).
+        ``actions`` (T, B) long, ``rewards`` (T, B) optional, ``positions``
+        (T, B, 2) NORMALIZED agent coordinates, optional. Ensemble/pose
+        targets are next-step quantities (masked where a done breaks the
+        transition).
         """
         horizon, batch = embeds.shape[0], embeds.shape[1]
         seq = self.observe_sequence(embeds, h0, dones)
@@ -266,17 +275,42 @@ class RSSMCore(nn.Module):
             denom = valid.sum().clamp(min=1.0)
             loss_ens = (torch.stack(nlls).mean(dim=0) * valid).sum() / denom
 
+        # Pose head: (state_t, action_t) -> normalized POST-ACTION position.
+        # The trainer records positions from the step's info dict, i.e.
+        # positions[t] already IS "one step ahead" of state_t — no shift, and
+        # no done masking (the transition itself happened inside the old
+        # world; done only means the NEXT observation is a fresh one).
+        loss_pose = torch.zeros((), device=embeds.device)
+        if positions is not None:
+            src = feats.reshape(horizon * batch, -1)
+            act = F.one_hot(actions.reshape(-1), self.num_actions).float()
+            pred_pose = self.decoder_pose(torch.cat([src, act], dim=-1))
+            loss_pose = F.mse_loss(pred_pose, positions.reshape(horizon * batch, 2))
+
         total = (
             self.kl_scale * kl
             + self.recon_scale * (loss_grid + loss_intero)
             + self.ensemble_scale * loss_ens
             + self.reward_scale * loss_reward
+            + self.pose_scale * loss_pose
         )
         return {
             "total": total, "kl": kl, "recon_grid": loss_grid,
             "recon_intero": loss_intero, "ensemble_nll": loss_ens,
-            "reward_mse": loss_reward, "features": feats,
+            "reward_mse": loss_reward, "pose_mse": loss_pose, "features": feats,
         }
+
+    @torch.no_grad()
+    def implied_pose(
+        self, features: torch.Tensor, action_onehot: torch.Tensor
+    ) -> torch.Tensor:
+        """(B, F), (B, A) -> (B, 2) decoder-implied NORMALIZED next position.
+
+        The mirror's world-model side of the divergence. no_grad by
+        construction: divergence is monitored, never minimized (CLAUDE.md-
+        adjacent hard rule for stage-6a; asserted in tests/test_mirror.py).
+        """
+        return self.decoder_pose(torch.cat([features, action_onehot], dim=-1))
 
     # ------------------------------------------------------------ imagination
 

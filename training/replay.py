@@ -42,6 +42,7 @@ class SequenceReplay:
         self.action = np.zeros((n, cap), dtype=np.int64)
         self.reward = np.zeros((n, cap), dtype=np.float32)
         self.done = np.zeros((n, cap), dtype=bool)
+        self.position = np.zeros((n, cap, 2), dtype=np.float32)  # normalized
         self.priority = np.zeros((n, cap), dtype=np.float64)
         self._ptr = 0  # synchronized across envs (vecenv steps them together)
         self._filled = 0
@@ -57,15 +58,18 @@ class SequenceReplay:
         action: np.ndarray,
         reward: np.ndarray,
         done: np.ndarray,
+        position: np.ndarray | None = None,
     ) -> None:
         """Add one synchronized tick for every env: grid (N, C, W, W) float,
-        intero (N, D), action (N,), reward (N,), done (N,)."""
+        intero (N, D), action (N,), reward (N,), done (N,), position (N, 2)
+        normalized post-action coordinates (optional; zeros when absent)."""
         i = self._ptr
         self.grid[:, i] = (grid > 0.5).astype(np.uint8)
         self.intero[:, i] = intero
         self.action[:, i] = action
         self.reward[:, i] = reward
         self.done[:, i] = done.astype(bool)
+        self.position[:, i] = position if position is not None else 0.0
         self.priority[:, i] = self._max_priority
         self._ptr = (self._ptr + 1) % self.per_env
         self._filled = min(self._filled + 1, self.per_env)
@@ -124,6 +128,7 @@ class SequenceReplay:
             "action": to_t(self.action[env_idx, idx], torch.long),
             "reward": to_t(self.reward[env_idx, idx], torch.float32),
             "done": to_t(self.done[env_idx, idx].astype(np.float32), torch.float32),
+            "position": to_t(self.position[env_idx, idx], torch.float32),
             "envs": sel[:, 0],
             "starts": sel[:, 1],
         }
@@ -145,6 +150,7 @@ class SequenceReplay:
         return {
             "grid": self.grid, "intero": self.intero, "action": self.action,
             "reward": self.reward, "done": self.done, "priority": self.priority,
+            "position": self.position,
             "ptr": self._ptr, "filled": self._filled,
             "max_priority": self._max_priority,
             "rng_state": self.rng.bit_generator.state,
@@ -157,6 +163,8 @@ class SequenceReplay:
         self.reward = state["reward"]
         self.done = state["done"]
         self.priority = state["priority"]
+        if "position" in state:
+            self.position = state["position"]
         self._ptr = state["ptr"]
         self._filled = state["filled"]
         self._max_priority = state["max_priority"]
