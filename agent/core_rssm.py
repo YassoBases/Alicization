@@ -116,6 +116,18 @@ class RSSMCore(nn.Module):
         h_next = torch.cat([deter, post_mean], dim=-1)
         return h_next, h_next
 
+    @torch.no_grad()
+    def surprise(self, embed: torch.Tensor, h_prev: torch.Tensor) -> torch.Tensor:
+        """KL(posterior || prior) per sample (B,) at this tick — the episodic
+        memory write-gate signal (memory/episodic.py). Recomputes the step's
+        distributions under no_grad; never touches training."""
+        deter = self._step_deter(embed, h_prev)
+        prior_mean, prior_std = self._stats(self.prior_net(deter))
+        post_mean, post_std = self._stats(
+            self.post_net(torch.cat([deter, embed], dim=-1))
+        )
+        return self._kl_diag_gauss(post_mean, post_std, prior_mean, prior_std)
+
     # ----------------------------------------------------------- world model
 
     def observe_sequence(

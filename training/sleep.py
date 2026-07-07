@@ -194,6 +194,14 @@ class CircadianTrainer:
         feats, _ = build_policy_features(
             core_features, self._inner.body_model, self.model.use_ledger_features
         )
+        if self._inner.memory_enabled:
+            # Imagination does not query episodic memory (imagined states have
+            # no position): a zero summary stands in. Known input-distribution
+            # mismatch vs wake, accepted for the prototype.
+            feats = torch.cat(
+                [feats, torch.zeros(feats.shape[0], self.model.memory_dim,
+                                    device=feats.device)], dim=-1,
+            )
         return self.model.heads(feats)
 
     @torch.no_grad()
@@ -429,6 +437,12 @@ class CircadianTrainer:
             agg = {k: v / steps_done for k, v in agg.items()}
         agg["sleep/grad_steps"] = float(steps_done)
         agg.update(self._forecaster_sleep_step())
+        # Episodic-memory pruning happens during sleep (stage-5a).
+        if self._inner.memory_enabled and self._inner._last_infos is not None:
+            dropped = 0
+            for mem, info in zip(self._inner.memories, self._inner._last_infos):
+                dropped += mem.prune(info["tick"])
+            agg["sleep/memory_pruned"] = float(dropped)
         self.sleep_metrics_history.append(agg)
         return agg
 
@@ -485,6 +499,7 @@ class CircadianTrainer:
             "pr_monitor_state": self.pr_monitor.state_dict(),
             "forecaster_state": self.forecaster.state_dict(),
             "fore_opt_state": self.fore_opt.state_dict(),
+            "memories": [m.state_dict() for m in self._inner.memories],
         }
         out = save_checkpoint(
             path, self.model, self.world_opt, self.env_steps, self.cfg, extra=extra
@@ -518,6 +533,8 @@ class CircadianTrainer:
         if "forecaster_state" in e:
             self.forecaster.load_state_dict(e["forecaster_state"])
             self.fore_opt.load_state_dict(e["fore_opt_state"])
+        for mem, state in zip(self._inner.memories, e.get("memories", [])):
+            mem.load_state_dict(state)
         self._inner._obs = self.vec.observe()
 
 

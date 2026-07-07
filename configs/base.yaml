@@ -126,6 +126,18 @@ ledger:
     # the classifier collapses to always-WORLD. Re-measure if body_hidden/lr change.
     lr: 1.0e-3
 
+memory:                       # additive (stage-5a): episodic memory
+  enabled: false               # requires agent.core: rssm (KL write gate)
+  capacity: 2000
+  latent_dim: 32
+  write_rate_target: 0.005     # ~1 write / 200 ticks (controller-adjusted)
+  gate_eta: 0.05
+  retrieve_k: 4
+  w_sim: 1.0
+  w_spatial: 1.0
+  spatial_sigma: 8.0
+  importance_tau: 20000        # recency decay for importance-based pruning
+
 checkpoints:
   interval: 50_000
   keep_last: 3

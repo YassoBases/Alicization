@@ -44,6 +44,7 @@ from ledger.body_model import (
 from training.attribution_eval import AttributionAccuracyTracker, ground_truth_label
 from training.checkpoints import load_checkpoint, prune_checkpoints, save_checkpoint
 from training.loggers import TBLogger
+from memory.episodic import EpisodicMemory
 from training.monitors import ParticipationRatioMonitor
 from training.vecenv import VecWorld
 from world.engine import NOOP, NUM_ACTIONS
@@ -135,7 +136,12 @@ class PPOModel(nn.Module):
         else:
             raise ValueError(f"unknown agent.core: {self.core_kind!r} (gru|rssm)")
         extra = 2 * NUM_ACTIONS if self.use_ledger_features else 0
-        policy_input_dim = self.core.output_dim + extra
+        mem_cfg = cfg.get("memory", {}) or {}
+        # Episodic-memory summary vector (stage-5a), appended detached.
+        self.memory_dim: int = (
+            mem_cfg.get("latent_dim", 32) if mem_cfg.get("enabled") else 0
+        )
+        policy_input_dim = self.core.output_dim + extra + self.memory_dim
         self.heads = ActorCritic(acfg, policy_input_dim, NUM_ACTIONS)
 
 
@@ -193,6 +199,30 @@ class PPOTrainer:
         # -> actions (N,) long. Set by the circadian trainer in arbiter mode.
         self.action_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None
         self._last_infos: list[dict[str, Any]] | None = None
+
+        # Episodic memory (stage-5a): one store per env — each vecenv slot is
+        # a different world; cleared at episode boundaries (world rebuilt).
+        mem_cfg = cfg.get("memory", {}) or {}
+        self.memory_enabled = bool(mem_cfg.get("enabled"))
+        self.memories: list[EpisodicMemory] = []
+        if self.memory_enabled:
+            if not self.is_rssm:
+                raise ValueError("memory.enabled requires agent.core: rssm "
+                                 "(the write gate is RSSM KL-surprise)")
+            self.memories = [
+                EpisodicMemory(
+                    mem_cfg, core_dim=self.model.core.output_dim,
+                    seed=cfg["seed"] * 1000 + i,
+                )
+                for i in range(n)
+            ]
+        # Proprioceptive position per env (same info as infos[i]["pos"]).
+        self._last_pos: list[tuple[int, int]] = [
+            (w.agents[0].x, w.agents[0].y) for w in self.vec.worlds
+        ]
+        self._mem_summary = torch.zeros(n, self.model.memory_dim, device=self.device)
+        n_terrain = cfg["world"]["terrain"]["num_types"]
+        self._ch_food, self._ch_water = n_terrain, n_terrain + 1
         world_size = cfg["world"]["size"]
         self.epistemic_map = np.zeros((world_size, world_size), dtype=np.float64)
         self.epistemic_count = np.zeros((world_size, world_size), dtype=np.int64)
@@ -225,7 +255,30 @@ class PPOTrainer:
     def _obs_tensors(self) -> tuple[torch.Tensor, torch.Tensor]:
         grid = torch.from_numpy(self._obs["grid"]).to(self.device)
         intero = torch.from_numpy(self._obs["intero"]).to(self.device)
+        if self.memory_enabled:
+            # memory_pressure intero slot (index 2, placeholder 0 in the
+            # world): fill fraction of this env's episodic store. Injected
+            # before any use, so buffers/replay/recon all see the same value.
+            intero[:, 2] = torch.tensor(
+                [m.pressure() for m in self.memories],
+                dtype=intero.dtype, device=self.device,
+            )
         return grid, intero
+
+    def _mem_retrieve(self, core_out: torch.Tensor) -> torch.Tensor:
+        """Per-env top-k retrieval summaries, (N, memory_dim), detached."""
+        rows = [
+            mem.retrieve(core_out[i].detach().cpu().numpy(), self._last_pos[i])[0]
+            for i, mem in enumerate(self.memories)
+        ]
+        return torch.from_numpy(np.stack(rows)).to(self.device)
+
+    def _mem_write_summary(self, grid_np: np.ndarray) -> dict[str, np.ndarray]:
+        """Local food/water bitmaps of the ego window (stage-5b verification)."""
+        return {
+            "food": grid_np[self._ch_food].astype(bool),
+            "water": grid_np[self._ch_water].astype(bool),
+        }
 
     @torch.no_grad()
     def collect_rollout(self) -> dict[str, torch.Tensor]:
@@ -265,6 +318,7 @@ class PPOTrainer:
             "pred_dpos_class": torch.zeros(rollout_len, n, dtype=torch.long, device=dev),
             "pred_denergy": torch.zeros(rollout_len, n, device=dev),
             "ground_truth_label": torch.zeros(rollout_len, n, dtype=torch.long, device=dev),
+            "mem_summary": torch.zeros(rollout_len, n, self.model.memory_dim, device=dev),
         }
         for t in range(rollout_len):
             h_in = self._h * (1.0 - self._done_prev).unsqueeze(-1)
@@ -276,6 +330,10 @@ class PPOTrainer:
             features, body_out = build_policy_features(
                 out, self.body_model, self.model.use_ledger_features
             )
+            if self.memory_enabled:
+                self._mem_summary = self._mem_retrieve(out)
+                buf["mem_summary"][t] = self._mem_summary
+                features = torch.cat([features, self._mem_summary], dim=-1)
             dist, value = self.model.heads(features)
             if self.action_fn is not None:
                 # Controller override (e.g. the stage-4c arbiter): actions come
@@ -333,16 +391,31 @@ class PPOTrainer:
                 dtype=torch.long,
                 device=dev,
             )
+            if self.memory_enabled:
+                mem_surprise = self.model.core.surprise(embed, h_in)
+                grid_np = grid.cpu().numpy()
+                for i, (info, mem) in enumerate(zip(infos, self.memories)):
+                    if dones[i] > 0:
+                        mem.clear()  # world rebuilt; old memories are moot
+                        continue
+                    mem.maybe_write(
+                        out[i].cpu().numpy(), tuple(info["pos"]), info["tick"],
+                        float(mem_surprise[i]),
+                        summary=self._mem_write_summary(grid_np[i]),
+                    )
             self._h = h_new
             self._done_prev = buf["done"][t]
             self._obs = obs
             self._last_infos = infos
+            self._last_pos = [tuple(info["pos"]) for info in infos]
 
         # Bootstrap value for GAE (masked hidden; unused across dones anyway).
         h_in = self._h * (1.0 - self._done_prev).unsqueeze(-1)
         grid, intero = self._obs_tensors()
         out, _ = self.model.core(self.model.encoder(grid, intero), h_in)
         features, _ = build_policy_features(out, self.body_model, self.model.use_ledger_features)
+        if self.memory_enabled:
+            features = torch.cat([features, self._mem_retrieve(out)], dim=-1)
         _, next_value = self.model.heads(features)
         buf["next_value"] = next_value
 
@@ -372,8 +445,10 @@ class PPOTrainer:
             # (T, N, ...) -> (n_seg, seq, N, ...)
             return x.reshape(n_seg, seq, *x.shape[1:])
 
-        seg = {k: by_segment(buf[k]) for k in
-               ("grid", "intero", "action", "logp", "done", "reward")}
+        seg_keys = ["grid", "intero", "action", "logp", "done", "reward"]
+        if self.memory_enabled:
+            seg_keys.append("mem_summary")
+        seg = {k: by_segment(buf[k]) for k in seg_keys}
         seg_adv, seg_ret, seg_val = by_segment(adv), by_segment(returns), by_segment(buf["value"])
 
         n_samples = n_seg * n  # number of BPTT sequences in this rollout
@@ -419,6 +494,13 @@ class PPOTrainer:
                     features, _ = build_policy_features(
                         flat_core_out, self.body_model, self.model.use_ledger_features
                     )
+                    if self.memory_enabled:
+                        # Replay the summaries SEEN at collection time — the
+                        # store has changed since; recomputing would be a
+                        # different (wrong) input distribution.
+                        features = torch.cat(
+                            [features, mb["mem_summary"].reshape(seq * m, -1)], dim=-1
+                        )
                     dist, value = self.model.heads(features)
                     # (seq, M) -> flat, matching outs layout
                     flat_action = mb["action"].reshape(-1)
@@ -613,6 +695,16 @@ class PPOTrainer:
                     metrics["rssm/aleatoric"] = self._aleatoric_sum / self._uncert_n
                     if self.pr_history:
                         metrics["rssm/participation_ratio"] = self.pr_history[-1]
+                if self.memory_enabled:
+                    metrics["memory/pressure"] = float(
+                        np.mean([m.pressure() for m in self.memories])
+                    )
+                    metrics["memory/write_rate"] = float(
+                        np.mean([m.gate.rate_ema for m in self.memories])
+                    )
+                    metrics["memory/gate_threshold"] = float(
+                        np.mean([m.gate.threshold for m in self.memories])
+                    )
                 elapsed = time.perf_counter() - t0
 
                 reward_rollout = buf["reward"].sum(dim=0).mean().item()
@@ -740,6 +832,8 @@ class PPOTrainer:
             "epistemic_count": self.epistemic_count.copy(),
             "pr_monitor_state": self.pr_monitor.state_dict(),
             "pr_history": list(self.pr_history),
+            "memories": [m.state_dict() for m in self.memories],
+            "last_pos": list(self._last_pos),
         }
         out = save_checkpoint(
             path, self.model, self.opt, self.global_step, self.cfg, extra=extra
@@ -783,4 +877,8 @@ class PPOTrainer:
         if "pr_monitor_state" in ckpt.extra:
             self.pr_monitor.load_state_dict(ckpt.extra["pr_monitor_state"])
             self.pr_history = list(ckpt.extra.get("pr_history", []))
+        for mem, state in zip(self.memories, ckpt.extra.get("memories", [])):
+            mem.load_state_dict(state)
+        if "last_pos" in ckpt.extra:
+            self._last_pos = [tuple(p) for p in ckpt.extra["last_pos"]]
         self._obs = self.vec.observe()
