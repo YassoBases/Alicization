@@ -1,0 +1,26 @@
+{
+  "config": "configs/smoke.yaml",
+  "seed": 0,
+  "env_steps": 50048,
+  "n_tuples": 20000,
+  "plan_counts": {
+    "forage_nearest": 5326,
+    "explore_high_epistemic": 650,
+    "rest": 1892,
+    "goto_shelter": 12132
+  },
+  "results": [
+    {
+      "horizon": 1,
+      "mse_forecaster": 0.0005128974444232881,
+      "mse_identity": 6.13102747593075e-05,
+      "nmse": 8.365603423517936
+    },
+    {
+      "horizon": 10,
+      "mse_forecaster": 0.0009615147719159722,
+      "mse_identity": 0.001237723627127707,
+      "nmse": 0.7768412518288011
+    }
+  ]
+}
