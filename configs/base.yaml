@@ -42,6 +42,7 @@ world:
 
 agent:
   core: gru                   # additive: gru | rssm (stage-4a drop-in switch)
+  controller: actor           # additive: actor | arbiter (stage-4c macro-plans)
   encoder_channels: [32, 64]
   hidden_size: 256           # GRU hidden / RSSM deterministic size
   gru_layers: 1
@@ -90,6 +91,11 @@ rssm:                        # stage-4a: wired into training via agent.core=rssm
   free_nats: 1.0
   kl_balance: 0.8
   min_std: 0.1
+  sleep: true                  # false = wake-only (sleep-ablation condition)
+  critic_ema_tau: 0.02         # slow EMA target critic (stage-4b imagination)
+  imagination_lambda: 0.95
+  imagination_norm_adv: true   # normalize imagined advantages (see sleep.py)
+  priority_alpha: 0.6          # proportional prioritized replay exponent
   monitor:                    # participation-ratio collapse detector
     every_ticks: 1000
     window: 1000
@@ -97,11 +103,21 @@ rssm:                        # stage-4a: wired into training via agent.core=rssm
 
 ledger:
   body_hidden: [128, 128]       # stage-3a: body model, wired into training
-  forecaster_hidden: [256, 256] # not yet wired
+  forecaster_hidden: [256, 256] # stage-4c: forecaster, trained in sleep
   horizons: [1, 10]           # add 100 in Stage 6
   lr: 1.0e-3
   online_updates: true        # body + reliability heads only
   log_ema_decay: 0.98          # additive: TB rolling-mean smoothing for ledger/* scalars
+  forecast_buffer: 20000       # additive: (h, plan, realized-future) tuple store
+  forecaster_batch: 512        # additive: NLL minibatch size in sleep
+  arbiter:                     # additive: stage-4c macro-plan arbiter
+    epsilon: 0.1
+    score_horizon: 10          # must be one of ledger.horizons
+    plan_commit_ticks: 10
+    setpoint_energy: 1.0
+    setpoint_fatigue: 0.0
+    weight_energy: 1.0
+    weight_fatigue: 0.25
   attribution:                 # stage-3b: self/world/both classifier, wired into training
     tau_pos: 0.5                # Manhattan-distance residual threshold (DPOS_CLASSES vectors)
     tau_energy: 0.03             # |denergy| residual threshold; empirically, ordinary

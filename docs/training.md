@@ -79,7 +79,7 @@ defaults (below); unchanged across base/smoke/full unless noted.
 converts it to a count of BPTT sequences (`training/ppo.py:update`) and it need
 not divide the rollout evenly.
 
-### `rssm` (Stage 4 — not yet wired into training)
+### `rssm` (Stage 4: wired — `agent.core: rssm` selects the RSSM core)
 
 | key                 | base    | smoke  | full    |
 |---------------------|---------|--------|---------|
@@ -95,6 +95,47 @@ not divide the rollout evenly.
 | replay_capacity     | 500,000 | 20,000 | 500,000 |
 | sleep_every         | 5,000   | 2,000  | 5,000   |
 | sleep_grad_steps    | 200     | 20     | 200     |
+
+Additive keys (not in the pasted defaults): `free_nats` 1.0, `kl_balance`
+0.8, `min_std` 0.1, `sleep` true (false = wake-only sleep-ablation),
+`critic_ema_tau` 0.02, `imagination_lambda` 0.95, `imagination_norm_adv`
+true, `priority_alpha` 0.6, and `monitor.{every_ticks,window,collapse_frac}`
+(participation-ratio collapse detector, `training/monitors.py`).
+
+**Stage 4a** (`agent/core_rssm.py`): drop-in GRUCore alternative with a flat
+`(B, deter+stoch)` state. Policy/collection path uses the posterior mean
+(deterministic — PPO replay and seeded reproducibility hold); reparameterized
+sampling exists only in the world-model loss (KL-balanced with free nats +
+grid/intero reconstruction + reward head + K-head dynamics-ensemble NLL),
+which joins PPO's backward pass under `agent.core: rssm`. Ensemble
+disagreement (epistemic) is spatially bucketed by agent position into a
+world-sized running-mean map saved with checkpoints; predicted variance is
+the aleatoric signal.
+
+**Stage 4b** (`training/replay.py`, `training/sleep.py`): CircadianTrainer
+alternates wake (env stepping + online body/attribution updates ONLY — a
+test asserts encoder/core/heads are bit-identical across a wake stretch) with
+sleep every `sleep_every` env steps: world-model training on prioritized
+replay sequences (proportional, alpha 0.6, priorities = per-sequence recon
+loss) and Dreamer-style imagination (prior rollouts, REINFORCE actor on
+normalized lambda-return advantages, critic MSE, slow-EMA target critic).
+Sleep scheduling is exogenous BY CONSTRUCTION: `is_sleep_tick` /
+`sleep_windows_due` take exactly `(env_steps, sleep_every)` — a signature
+test fails if that ever grows.
+
+**Stage 4c** (`ledger/forecaster.py`, `agent/drives.py`): the forecaster maps
+`h.detach()` + a one-hot macro-plan id to (mean, logvar) of the intero vector
+at each `ledger.horizons` entry; NLL-trained during sleep on stored
+(h, plan, realized-future) tuples under its own optimizer (gradient-isolation
+test extended). The arbiter (`agent.controller: arbiter`) scores the four
+plans — forage_nearest, explore_high_epistemic, rest, goto_shelter — by
+forecasted drive error against setpoints at `ledger.arbiter.score_horizon`,
+epsilon-greedy over scores, committing each choice for `plan_commit_ticks`.
+Plan executors are scripted policies over the agent's own egocentric window
+(+ its own epistemic-map estimate for explore). Every forecast evaluation
+reports NMSE against the identity predictor (mandatory baseline);
+`scripts/verify_forecaster.py` writes forecaster_report.{json,md} and a plot
+with the identity baseline.
 
 ### `ledger`
 
@@ -114,9 +155,12 @@ not divide the rollout evenly.
 (`ledger/body_model.py`, `training/ppo.py`'s `update_body_model`). The body
 model trains online — one gradient step per rollout, on that rollout's fresh
 transitions — with its own Adam optimizer, entirely separate from
-`self.opt` (the policy/value optimizer). `forecaster_hidden`, `horizons`, and
-`online_updates` are not yet wired (reliability/forecaster heads are still
-stubs).
+`self.opt` (the policy/value optimizer). `forecaster_hidden`/`horizons` are
+wired as of Stage 4c (see the `rssm` section above); the reliability head is
+still a stub. Additive ledger keys for Stage 4c: `forecast_buffer` 20,000,
+`forecaster_batch` 512, and the `arbiter` block (`epsilon` 0.1,
+`score_horizon` 10, `plan_commit_ticks` 10, setpoints/weights for
+energy/fatigue).
 
 **Gradient isolation** (CLAUDE.md Hard rules): the body model's input is
 `h.detach()` concatenated with a one-hot action; its own CE+BCE+MSE loss can

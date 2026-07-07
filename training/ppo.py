@@ -18,7 +18,7 @@ import contextlib
 import signal
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import torch
@@ -189,6 +189,10 @@ class PPOTrainer:
         # RSSM-only monitoring: epistemic map + participation-ratio collapse
         # detector (training-side bookkeeping; nothing here is agent-visible).
         self.is_rssm = isinstance(self.model.core, RSSMCore)
+        # Optional controller override: callable (core_out (N,F), intero (N,D))
+        # -> actions (N,) long. Set by the circadian trainer in arbiter mode.
+        self.action_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None
+        self._last_infos: list[dict[str, Any]] | None = None
         world_size = cfg["world"]["size"]
         self.epistemic_map = np.zeros((world_size, world_size), dtype=np.float64)
         self.epistemic_count = np.zeros((world_size, world_size), dtype=np.int64)
@@ -273,7 +277,14 @@ class PPOTrainer:
                 out, self.body_model, self.model.use_ledger_features
             )
             dist, value = self.model.heads(features)
-            action = dist.sample()
+            if self.action_fn is not None:
+                # Controller override (e.g. the stage-4c arbiter): actions come
+                # from the hook; logp/value are still recorded under the current
+                # policy dist for buffer completeness (PPO's update is never
+                # used together with an override).
+                action = self.action_fn(out, intero).to(dev)
+            else:
+                action = dist.sample()
 
             obs, rewards, dones, infos = self.vec.step(action.cpu().numpy())
             buf["grid"][t] = grid
@@ -325,6 +336,7 @@ class PPOTrainer:
             self._h = h_new
             self._done_prev = buf["done"][t]
             self._obs = obs
+            self._last_infos = infos
 
         # Bootstrap value for GAE (masked hidden; unused across dones anyway).
         h_in = self._h * (1.0 - self._done_prev).unsqueeze(-1)

@@ -194,3 +194,50 @@ def test_participation_ratio_collapse_warning(caplog: pytest.LogCaptureFixture) 
         pr = mon.maybe_compute(20)
     assert pr is not None and pr < 0.25 * 16
     assert any("participation ratio collapse" in r.message for r in caplog.records)
+
+
+def test_reward_head_aligned_to_post_action_state() -> None:
+    """Regression for a silent one-step misalignment: replay reward[t] is
+    earned on the transition INTO state t+1, and imagination reads
+    reward_head(h_{t+1}) after acting — so world_model_loss must train
+    reward_head(features[t+1]) ~ reward[t]. Construct sequences where reward
+    is +1 exactly when the observation flips to pattern B; a head trained on
+    the PRE-action state cannot separate the classes, an aligned one can."""
+    torch.manual_seed(3)
+    core = make_core()
+    opt = torch.optim.Adam(core.parameters(), lr=1e-3)
+    horizon, batch = 8, 8
+
+    def build_batch(seed: int):
+        g = torch.Generator().manual_seed(seed)
+        flags = torch.randint(0, 2, (horizon, batch), generator=g).float()  # 1 = pattern B
+        embeds = flags.unsqueeze(-1) * torch.ones(24) * 2.0 - 1.0  # A=-1s, B=+1s
+        rewards = torch.zeros(horizon, batch)
+        rewards[:-1] = flags[1:]  # reward at t iff NEXT obs is B
+        return embeds, rewards
+
+    embeds, rewards = build_batch(0)
+    h0 = core.initial_state(batch, torch.device("cpu"))
+    dones = torch.zeros(horizon, batch)
+    actions = torch.zeros(horizon, batch, dtype=torch.long)
+    grid = torch.zeros(horizon, batch, *GRID_SHAPE)
+    intero = torch.zeros(horizon, batch, INTERO_DIM)
+
+    for _ in range(150):
+        loss = core.world_model_loss(embeds, h0, dones, actions, grid, intero, rewards)
+        opt.zero_grad()
+        loss["total"].backward()
+        opt.step()
+
+    # Evaluate: reward_head on posterior features of B-flagged states must be
+    # clearly higher than on A-flagged states.
+    with torch.no_grad():
+        seq = core.observe_sequence(embeds, h0, dones)
+        flat = seq["features"].reshape(horizon * batch, -1)
+        preds = core.reward_head(flat).squeeze(-1).reshape(horizon, batch)
+        flags = (embeds[..., 0] > 0).float()
+        mean_b = preds[flags == 1].mean().item()
+        mean_a = preds[flags == 0].mean().item()
+    assert mean_b - mean_a > 0.5, (
+        f"reward head cannot separate post-action states: B={mean_b:.3f} A={mean_a:.3f}"
+    )

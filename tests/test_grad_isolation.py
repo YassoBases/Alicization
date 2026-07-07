@@ -8,6 +8,8 @@ Directions covered, all load-bearing:
 3. The attribution classifier's own CE loss must never reach the encoder/GRU
    core OR the body model (its three scalar inputs are derived from the body
    model's already-detached prediction and from plain observed values).
+4. The forecaster's NLL loss must never reach the encoder/core or the
+   actor-critic heads (its input is h.detach() + a plan one-hot).
 
 Each test also asserts the OPPOSITE side does receive gradient, to guard
 against a vacuously-passing test (e.g. a broken forward pass that produces no
@@ -173,3 +175,40 @@ def test_integration_ledger_updates_never_touch_policy_params_via_real_trainer()
     # Sanity: the Ledger heads themselves DID get gradient (not a vacuous pass).
     assert _some_grad_reached(trainer.body_model.parameters())
     assert _some_grad_reached(trainer.attribution_model.parameters())
+
+
+def test_forecaster_loss_does_not_reach_core_or_heads() -> None:
+    """Direction 4: forecaster NLL backward must leave encoder, core, and
+    actor-critic heads untouched; the forecaster itself must train."""
+    from agent.drives import NUM_PLANS
+    from ledger.forecaster import Forecaster, forecaster_nll
+
+    torch.manual_seed(4)
+    batch, grid_channels, window, intero_dim = 5, 5, 11, 6
+    encoder = ObsEncoder(
+        {"encoder_channels": [4, 8]}, grid_channels, intero_dim, embed_dim=16, window=window
+    )
+    core = GRUCore({"hidden_size": 16}, input_dim=16)
+    heads = ActorCritic({}, 16 + 2 * NUM_ACTIONS, NUM_ACTIONS)
+    forecaster = Forecaster(
+        {"forecaster_hidden": [16, 16], "horizons": [1, 10]},
+        core_dim=16, intero_dim=intero_dim, num_plans=NUM_PLANS,
+    )
+
+    grid = torch.randn(batch, grid_channels, window, window)
+    intero = torch.randn(batch, intero_dim)
+    out, _ = core(encoder(grid, intero), core.initial_state(batch, torch.device("cpu")))
+    plan_oh = torch.nn.functional.one_hot(
+        torch.randint(0, NUM_PLANS, (batch,)), NUM_PLANS
+    ).float()
+
+    fc = forecaster(out.detach(), plan_oh)
+    target = torch.rand(batch, intero_dim)
+    loss = forecaster_nll(fc[10][0], fc[10][1], target) + forecaster_nll(
+        fc[1][0], fc[1][1], target
+    )
+    loss.backward()
+
+    frozen = list(encoder.parameters()) + list(core.parameters()) + list(heads.parameters())
+    assert _no_grad_reached(frozen), "forecaster loss leaked into encoder/core/heads"
+    assert _some_grad_reached(forecaster.parameters())

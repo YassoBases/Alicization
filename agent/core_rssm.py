@@ -222,10 +222,20 @@ class RSSMCore(nn.Module):
         loss_grid = F.mse_loss(recon_grid, grid_target)
         loss_intero = F.mse_loss(recon_intero, intero_target)
 
+        # Reward alignment: replay reward[t] is earned on the transition INTO
+        # state t+1, and imagination reads reward_head(h_{t+1}) after acting —
+        # so train reward_head(features[t+1]) ~ reward[t], masked where a done
+        # at t breaks the transition. (Training it on features[t] instead
+        # silently divorces reward from the action that caused it.)
         loss_reward = torch.zeros((), device=embeds.device)
-        if rewards is not None:
-            pred_r = self.reward_head(flat).reshape(horizon, batch)
-            loss_reward = F.mse_loss(pred_r, rewards)
+        if rewards is not None and horizon > 1:
+            pred_r = self.reward_head(
+                feats[1:].reshape((horizon - 1) * batch, -1)
+            ).squeeze(-1)
+            target_r = rewards[:-1].reshape(-1)
+            valid_r = 1.0 - dones[:-1].reshape(-1)
+            denom_r = valid_r.sum().clamp(min=1.0)
+            loss_reward = (((pred_r - target_r) ** 2) * valid_r).sum() / denom_r
 
         # Ensemble NLL: state_t + action_t -> embed_{t+1}; a done at t breaks it.
         loss_ens = torch.zeros((), device=embeds.device)
