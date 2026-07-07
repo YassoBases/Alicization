@@ -200,6 +200,9 @@ class CircadianTrainer:
         if self.run_dir is not None:
             self.run_dir.mkdir(parents=True, exist_ok=True)
             self.tb = TBLogger(self.run_dir / "tb")
+            # The inner PPOTrainer was built without a run_dir; route the
+            # per-run artifacts (config.json, JSONL, viz state dump) here.
+            self._inner.attach_run_outputs(self.run_dir)
 
     # ------------------------------------------------------------------ wake
 
@@ -483,7 +486,8 @@ class CircadianTrainer:
         lam = r.get("imagination_lambda", 0.95)
         ent_coef = r.get("imagination_entropy_coef", self.pcfg["entropy_coef"])
         agg = {"sleep/wm_total": 0.0, "sleep/recon": 0.0, "sleep/kl": 0.0,
-               "sleep/actor": 0.0, "sleep/critic": 0.0, "sleep/imagined_reward": 0.0}
+               "sleep/pose_mse": 0.0, "sleep/actor": 0.0, "sleep/critic": 0.0,
+               "sleep/imagined_reward": 0.0}
         steps_done = 0
 
         for _ in range(r["sleep_grad_steps"]):
@@ -566,6 +570,7 @@ class CircadianTrainer:
             agg["sleep/wm_total"] += wm["total"].item()
             agg["sleep/recon"] += wm["recon_grid"].item() + wm["recon_intero"].item()
             agg["sleep/kl"] += wm["kl"].item()
+            agg["sleep/pose_mse"] += wm["pose_mse"].item()
             agg["sleep/actor"] += actor_loss.item()
             agg["sleep/critic"] += critic_loss.item()
             agg["sleep/imagined_reward"] += imag["reward"].mean().item()
@@ -595,15 +600,24 @@ class CircadianTrainer:
             stretch = min(sleep_every, total - self.env_steps)
             t0 = time.perf_counter()
             metrics = self.wake_phase(stretch)
+            slept = False
             if self.sleep_enabled and sleep_windows_due(self.env_steps, sleep_every) > self._sleep_windows_done:
                 self._sleep_windows_done = sleep_windows_due(self.env_steps, sleep_every)
                 metrics.update(self.sleep_phase())
+                slept = True
+            # Phase marker: 1.0 at env-step counts where a sleep window ran.
+            metrics["phase/sleep"] = float(slept)
             elapsed = time.perf_counter() - t0
             metrics["sps"] = stretch / elapsed
             self.last_metrics = metrics
             if self.tb is not None:
                 for tag, val in metrics.items():
                     self.tb.scalar(tag, val, self.env_steps)
+                for ev in getattr(self._inner, "_lever_events", []):
+                    detail = ", ".join(
+                        f"{k}={v}" for k, v in ev.items() if k not in ("type", "cause")
+                    )
+                    self.tb.text("levers/events", f"`{ev['type']}` {detail}", self.env_steps)
             print(
                 f"env_steps {self.env_steps}  reward/rollout {metrics['reward/rollout']:+.3f}  "
                 + (f"wm {metrics.get('sleep/wm_total', float('nan')):.3f}  " if self.sleep_enabled else "")

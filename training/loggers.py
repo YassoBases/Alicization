@@ -82,6 +82,36 @@ class JsonlRunLogger:
             self._chunk = None
 
 
+def write_viz_state(path: str | Path, state: dict[str, Any]) -> None:
+    """Atomically dump the live-viewer state snapshot (viz/viewer.py --live).
+
+    Written every ``run.viz_dump_every`` ticks by the trainer; the viewer
+    polls the file's mtime. Atomic via temp-file + replace so a reader never
+    sees a torn write.
+    """
+    import pickle
+
+    path = Path(path)
+    tmp = path.with_suffix(".tmp")
+    with open(tmp, "wb") as f:
+        pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
+    tmp.replace(path)
+
+
+def read_viz_state(path: str | Path) -> dict[str, Any] | None:
+    """Read a viz state dump; None if absent or torn mid-write."""
+    import pickle
+
+    path = Path(path)
+    if not path.exists():
+        return None
+    try:
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    except (EOFError, pickle.UnpicklingError):
+        return None
+
+
 class TBLogger:
     """Thin TensorBoard SummaryWriter wrapper (scalars only for now)."""
 
@@ -93,6 +123,10 @@ class TBLogger:
 
     def scalar(self, tag: str, value: float, step: int) -> None:
         self._writer.add_scalar(tag, value, step)
+
+    def text(self, tag: str, text: str, step: int) -> None:
+        """Text annotation at a step (e.g. lever events at their tick)."""
+        self._writer.add_text(tag, text, step)
 
     def flush(self) -> None:
         self._writer.flush()

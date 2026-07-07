@@ -15,6 +15,7 @@ on detached hidden states (CLAUDE.md Hard rules).
 from __future__ import annotations
 
 import contextlib
+import json
 import signal
 import time
 from pathlib import Path
@@ -43,13 +44,21 @@ from ledger.body_model import (
 )
 from training.attribution_eval import AttributionAccuracyTracker, ground_truth_label
 from training.checkpoints import load_checkpoint, prune_checkpoints, save_checkpoint
-from training.loggers import TBLogger
+from training.loggers import JsonlRunLogger, TBLogger, write_viz_state
 from ledger.mirror import PROBING, MirrorMonitor
 from ledger.reliability import ReliabilityModel, compare_summaries
 from memory.episodic import EpisodicMemory
 from training.monitors import ParticipationRatioMonitor
 from training.vecenv import VecWorld
 from world.engine import NOOP, NUM_ACTIONS
+
+
+# World events that mark experiment levers: annotated into TensorBoard as
+# text at their tick (viewer/dashboard draw them as vertical markers).
+_LEVER_EVENT_TYPES = frozenset({
+    "capability_shift_start", "capability_shift_end",
+    "seasonal_shift", "exogenous_reset",
+})  # deliberately excludes per-patch food_relocated: hundreds per run drown TB text
 
 
 def resolve_device(name: str) -> torch.device:
@@ -271,9 +280,63 @@ class PPOTrainer:
 
         self.run_dir = Path(run_dir) if run_dir is not None else None
         self.tb: TBLogger | None = None
+        self.jsonl: JsonlRunLogger | None = None
+        self._viz_dump_path: Path | None = None
+        self._viz_dump_every: int = int(cfg["run"].get("viz_dump_every", 512))
+        self._last_viz_dump = 0
         if self.run_dir is not None:
             self.run_dir.mkdir(parents=True, exist_ok=True)
             self.tb = TBLogger(self.run_dir / "tb")
+            self.attach_run_outputs(self.run_dir)
+
+    def attach_run_outputs(self, run_dir: str | Path) -> None:
+        """Wire per-run artifacts to ``run_dir``: resolved config.json, the
+        per-tick JSONL event log (env 0's stream; docs/logging.md schema),
+        and the live-viewer state dump. Called from this trainer's __init__
+        and by CircadianTrainer (whose inner PPOTrainer has no run_dir)."""
+        run_dir = Path(run_dir)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "config.json").write_text(
+            json.dumps(self.cfg, indent=2, default=str), encoding="utf-8"
+        )
+        if self.cfg["run"].get("jsonl_log", True):
+            self.jsonl = JsonlRunLogger(run_dir)
+        self._viz_dump_path = run_dir / "viz_state.pkl"
+
+    def collect_viz_state(self) -> dict[str, Any]:
+        """Snapshot env 0 for the live viewer (experimenter-side telemetry)."""
+        world = self.vec.worlds[0]
+        agent = world.agents[0]
+        state: dict[str, Any] = {
+            "tick": world.tick,
+            "global_step": self.global_step,
+            "world_size": world.size,
+            "terrain": world.terrain.copy(),
+            "food": world.food.copy(),
+            "water": world.water.copy(),
+            "shelter": world.shelter.copy(),
+            "mark": world.mark.copy(),
+            "agent_pos": (agent.x, agent.y),
+            "intero": self._obs["intero"][0].tolist(),
+            "action": int(self._last_infos[0]["action"]) if self._last_infos else None,
+            "day_frac": (world.tick % world.day_length) / world.day_length,
+            "night_start_frac": world.night_start / world.day_length,
+            "epistemic_map": self.epistemic_map.copy() if self.is_rssm else None,
+        }
+        if self.memory_enabled and self.memories:
+            mem = self.memories[0]
+            rel_fn = self._reliability_fn(0)
+            idx = np.arange(mem.size)
+            state["memory"] = {
+                "positions": mem.positions[: mem.size].copy(),
+                "reliability": (rel_fn(idx) if rel_fn is not None and mem.size
+                                else np.ones(mem.size)),
+                "last_verified": mem.last_verified[: mem.size].copy(),
+            }
+        if self.mirror is not None and self.mirror.divergence_history:
+            tail = np.stack(self.mirror.divergence_history[-256:])[:, 0]
+            state["divergence_tail"] = tail
+        return state
 
     # -------------------------------------------------------------- rollouts
 
@@ -395,6 +458,7 @@ class PPOTrainer:
         dev = self.device
         core_dim = self.model.core.output_dim
         self._epistemic_sum, self._aleatoric_sum, self._uncert_n = 0.0, 0.0, 0
+        self._lever_events: list[dict[str, Any]] = []
         buf = {
             "grid": torch.zeros(rollout_len, n, c, w, w, device=dev),
             "intero": torch.zeros(rollout_len, n, self.vec.intero_dim, device=dev),
@@ -513,6 +577,12 @@ class PPOTrainer:
                 dtype=torch.long,
                 device=dev,
             )
+            # Lever events -> TensorBoard text annotations at their tick
+            # (experiment bookkeeping; the agent never sees these).
+            for info in infos:
+                for ev in info.get("events", []):
+                    if ev.get("type") in _LEVER_EVENT_TYPES:
+                        self._lever_events.append(dict(ev))
             if self.memory_enabled:
                 mem_surprise = self.model.core.surprise(embed, h_in)
                 grid_np = grid.cpu().numpy()
@@ -532,6 +602,21 @@ class PPOTrainer:
             self._last_infos = infos
             self._last_pos = [tuple(info["pos"]) for info in infos]
             self._last_tick = [info["tick"] for info in infos]
+            if self.jsonl is not None:
+                info0 = infos[0]
+                self.jsonl.log_tick(
+                    tick=info0["tick"], pos=info0["pos"], action=int(action[0]),
+                    success=bool(info0["realized"]["success"]),
+                    intero=obs["intero"][0], reward=float(rewards[0]),
+                    events=info0.get("events") or None,
+                )
+            if (
+                self._viz_dump_path is not None
+                and self.global_step + (t + 1) * n - self._last_viz_dump
+                >= self._viz_dump_every
+            ):
+                self._last_viz_dump = self.global_step + (t + 1) * n
+                write_viz_state(self._viz_dump_path, self.collect_viz_state())
 
         # Bootstrap value for GAE (masked hidden; unused across dones anyway).
         h_in = self._h * (1.0 - self._done_prev).unsqueeze(-1)
@@ -589,7 +674,8 @@ class PPOTrainer:
         metric_keys = ["loss/policy", "loss/value", "loss/total", "entropy",
                        "approx_kl", "clip_frac"]
         if self.is_rssm:
-            metric_keys += ["rssm/recon", "rssm/kl", "rssm/ensemble_nll"]
+            metric_keys += ["rssm/recon", "rssm/kl", "rssm/ensemble_nll",
+                            "rssm/pose_mse", "rssm/reward_mse"]
         metrics = {k: 0.0 for k in metric_keys}
         n_mb = 0
 
@@ -675,6 +761,8 @@ class PPOTrainer:
                         )
                         metrics["rssm/kl"] += wm["kl"].item()
                         metrics["rssm/ensemble_nll"] += wm["ensemble_nll"].item()
+                        metrics["rssm/pose_mse"] += wm["pose_mse"].item()
+                        metrics["rssm/reward_mse"] += wm["reward_mse"].item()
 
                 self.opt.zero_grad()
                 loss.backward()
@@ -789,6 +877,9 @@ class PPOTrainer:
         bce = self.reliability.train_step()
         if bce is not None:
             metrics["ledger/reliability_bce"] = bce
+        ece, _ = self.reliability.calibration_ece()
+        if np.isfinite(ece):
+            metrics["ledger/reliability_ece"] = ece
         return metrics
 
     # ----------------------------------------------------------------- train
@@ -838,6 +929,11 @@ class PPOTrainer:
                     metrics["rssm/aleatoric"] = self._aleatoric_sum / self._uncert_n
                     if self.pr_history:
                         metrics["rssm/participation_ratio"] = self.pr_history[-1]
+                    seen = self.epistemic_count > 0
+                    if seen.any():
+                        metrics["rssm/epistemic_map_mean"] = float(
+                            self.epistemic_map[seen].mean()
+                        )
                 if self.mirror is not None and self.mirror.divergence_history:
                     recent = np.concatenate(self.mirror.divergence_history[-64:])
                     metrics["mirror/divergence"] = float(recent.mean())
@@ -864,6 +960,14 @@ class PPOTrainer:
                 if self.tb is not None:
                     for tag, val in metrics.items():
                         self.tb.scalar(tag, val, self.global_step)
+                    for ev in self._lever_events:
+                        detail = ", ".join(
+                            f"{k}={v}" for k, v in ev.items() if k not in ("type", "cause")
+                        )
+                        self.tb.text(
+                            "levers/events",
+                            f"`{ev['type']}` {detail}", self.global_step,
+                        )
                 updates_done += 1
                 if updates_done % 10 == 1:
                     print(

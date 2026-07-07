@@ -165,3 +165,5 @@ run:
   run_dir: runs
   log_every: 1000
   assert_improvement: false
+  jsonl_log: true              # additive: per-tick JSONL event log (env 0 stream)
+  viz_dump_every: 512          # additive: live-viewer state dump interval (ticks)

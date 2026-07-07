@@ -37,5 +37,5 @@ policy as inputs.
 - Resume from checkpoint: python train.py --config <cfg> --resume <ckpt.pt>
 - Run tests: pytest -x -q (or make test)
 - Soak test (1M-tick random agent): python scripts/soak.py (or make soak)
-- Live viewer: python -m viz.viewer --run runs/latest
+- Live viewer: python -m viz.viewer --live runs/<id>  (scrub a finished run: --replay runs/<id>; render video: --replay runs/<id> --record out.mp4)
 - Dashboard: streamlit run viz/dashboard.py
