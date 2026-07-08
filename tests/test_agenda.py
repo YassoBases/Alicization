@@ -3,7 +3,6 @@ candidates in the same ranking, and rendered output."""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -83,11 +82,38 @@ def test_proposals_enter_the_same_agenda() -> None:
     assert prop_item.decomposition["value"] == pytest.approx(0.4 * 0.5)
 
 
-def test_write_agenda_renders_decomposition(tmp_path: Path) -> None:
-    items = rank_v1([q("q-a", 0.9, region=None)], [], None)
-    json_path, md_path = write_agenda(items, tmp_path / "run", tick=1234)
-    data = json.loads(json_path.read_text())
-    assert data[0]["decomposition"]["value"] == 0.9
+def test_write_agenda_emits_proposals_and_renders_from_queue(tmp_path: Path) -> None:
+    from proposals.schema import load_all
+
+    run = tmp_path / "run"
+    questions = [q("q-a", 0.9, region=None)]
+    items = rank_v1(questions, [], None)
+    emitted, md_path = write_agenda(items, run, tick=1234, questions=questions,
+                                    bundle_hash="hash0", ranker_id="v1")
+    # Emitted as an experiment proposal into the shared queue (stage-C3).
+    assert len(emitted) == 1
+    p = emitted[0]
+    assert p.intervention_class == "experiment" and p.source == "researcher"
+    assert p.target == "q-a"
+    assert p.provenance["evidence_bundle_hash"] == "hash0"
+    assert p.provenance["agenda_decomposition"]["value"] == 0.9
+    assert "viz_state:epistemic_map" in p.supporting_observations[0]
+    assert [x.id for x in load_all(run)] == [p.id]
+    # research_agenda.md rendered FROM the queue.
     md = md_path.read_text()
-    assert "score" in md and "tractability" in md and "q-a" in md
-    assert json_path.parent.name == "researcher"
+    assert "score" in md and "tractability" in md and p.rationale[:20] in md
+    assert md_path.parent.name == "researcher"
+
+
+def test_emit_agenda_dedups_across_reruns(tmp_path: Path) -> None:
+    from proposals.schema import load_all
+
+    run = tmp_path / "run"
+    questions = [q("q-a", 0.9, region=None), q("q-b", 0.5, region=None)]
+    items = rank_v1(questions, [], None)
+    first, _ = write_agenda(items, run, tick=1, questions=questions)
+    assert len(first) == 2
+    # A second sleep-phase pass over the same store emits nothing new.
+    second, _ = write_agenda(items, run, tick=2, questions=questions)
+    assert second == []
+    assert len(load_all(run)) == 2

@@ -163,14 +163,31 @@ battery can score EIG calibration against realized reductions
 
 ## Outputs
 
-Per sleep phase, under `runs/<id>/researcher/`:
+The agenda is no longer a parallel artifact (stage-C3): each ranked
+question is emitted into the SHARED proposal queue as an
+`intervention_class=experiment` proposal (`source=researcher`,
+`type=evaluation`), deduped by `(type, target=question id)` so repeated
+sleep-phase passes never duplicate. The agenda score decomposition,
+`predicted_gain`, hypothesis links, and the experiment spec live in the
+proposal's `provenance`; `expected_benefit.magnitude_estimate` carries the
+predicted gain; `supporting_observations` carries the question's evidence
+refs. Rule-generator recommendations already live in the same queue, so
+the queue is the single source of truth.
 
-- `agenda_<tick>.json` — every item with score decomposition,
-  hypothesis links, predicted gain
-- `research_agenda.md` — top 10, human-readable, each with the question,
-  the proposed experiment, the score decomposition, and which hypothesis
-  a result would move
-- `hypotheses/*.json`, `contradiction_events.jsonl`
+Per sleep phase, under `runs/<id>/`:
+
+- `proposals/prop-*.json` — the researcher's experiment proposals
+  alongside the generators' config/experiment ones
+- `researcher/research_agenda.md` — top 10, rendered FROM the queue
+  (pending proposals sorted by score, each with the experiment, score
+  decomposition, and which hypothesis a result would move). **Source is
+  never printed** in this artifact, so a co-listed generator proposal's
+  `ledger`/`logs_only` origin cannot leak — blind review stays intact.
+- `researcher/hypotheses/*.json`, `researcher/contradiction_events.jsonl`
+
+The dashboard's Research Agenda page reads the same queue
+(`load_agenda_table` filters to researcher-emitted experiment proposals,
+ranked by `provenance.agenda_score`).
 
 ## Three-arm value battery (P9.4, experiments/batteries/researcher_value.py)
 

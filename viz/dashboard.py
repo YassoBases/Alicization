@@ -285,28 +285,38 @@ def repeated_after_denial(runs_root: str | Path) -> pd.DataFrame:
 
 
 def load_agenda_table(run_dir: str | Path) -> pd.DataFrame:
-    """Latest runs/<id>/researcher/agenda_<tick>.json as one row per item
-    (already ranked; row order is agenda order)."""
-    rdir = Path(run_dir) / "researcher"
-    agendas = sorted(rdir.glob("agenda_*.json"))
+    """The research agenda, read from the UNIFIED proposal queue (stage-C3):
+    researcher-emitted experiment proposals (source=researcher), ranked by
+    the agenda score stored in provenance. Replaces the old parallel
+    researcher/agenda_<tick>.json artifact."""
     columns = ["rank", "kind", "ref", "statement", "score", "value",
                "tractability", "novelty", "cost", "predicted_gain",
                "experiment", "hypothesis_links"]
-    if not agendas:
+    pdir = Path(run_dir) / "proposals"
+    if not pdir.exists():
         return pd.DataFrame(columns=columns)
-    items = json.loads(agendas[-1].read_text(encoding="utf-8"))
     rows = []
-    for rank, it in enumerate(items, start=1):
-        d = it.get("decomposition", {})
+    for path in sorted(pdir.glob("prop-*.json")):
+        if path.name.endswith(".edit.json"):
+            continue
+        rec = json.loads(path.read_text(encoding="utf-8"))
+        prov = rec.get("provenance") or {}
+        if "agenda_score" not in prov:      # not a researcher agenda item
+            continue
+        d = prov.get("agenda_decomposition") or {}
         rows.append({
-            "rank": rank, "kind": it["kind"], "ref": it["ref"],
-            "statement": it["statement"], "score": it["score"],
+            "kind": "question", "ref": rec.get("target", ""),
+            "statement": rec["rationale"],
+            "score": float(prov["agenda_score"]),
             "value": d.get("value"), "tractability": d.get("tractability"),
             "novelty": d.get("novelty"), "cost": d.get("cost"),
-            "predicted_gain": it.get("predicted_gain"),
-            "experiment": json.dumps(it.get("experiment", {})),
-            "hypothesis_links": ", ".join(it.get("hypothesis_links", [])),
+            "predicted_gain": prov.get("predicted_gain"),
+            "experiment": json.dumps(prov.get("experiment", {})),
+            "hypothesis_links": ", ".join(prov.get("hypothesis_links", [])),
         })
+    rows.sort(key=lambda r: (-r["score"], r["ref"]))
+    for rank, r in enumerate(rows, start=1):
+        r["rank"] = rank
     return pd.DataFrame(rows, columns=columns)
 
 

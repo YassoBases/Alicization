@@ -25,17 +25,24 @@ move. Deterministic given a fixed log store (tested).
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 
 
 from ledger.competence import CompetenceReport
-from proposals.schema import Proposal
+from proposals.schema import Proposal, load_all, save_proposal
 from researcher.questions import Question
 
 TRACTABILITY_FLOOR = 0.05
+
+# Researcher-emitted agenda items live in the SAME proposal queue as the
+# rule-generator recommendations (stage-C3); this source marks them. It is
+# NOT a blind-review control variant (that is ledger vs logs_only), so it
+# may be shown freely — but research_agenda.md still prints no source at all,
+# so a co-listed generator proposal's ledger/logs_only origin never leaks.
+RESEARCHER_SOURCE = "researcher"
 
 
 @dataclass
@@ -124,38 +131,141 @@ def rank_v1(
     return items
 
 
+# ---------------------------------------------------- queue emission (C3)
+
+
+def agenda_item_to_proposal(
+    item: AgendaItem, run_dir: str | Path, *, ranker_id: str,
+    bundle_hash: str, evidence_refs: list[str], tick: int,
+) -> Proposal:
+    """One ranked QUESTION item -> an intervention_class=experiment proposal
+    in the shared queue. The agenda score decomposition, predicted gain, and
+    hypothesis links live in provenance (schema has no score field); the
+    predicted gain is also the expected_benefit magnitude, per spec."""
+    d = item.decomposition
+    magnitude = (item.predicted_gain if item.predicted_gain is not None
+                 else item.score)
+    return Proposal.new(
+        type="evaluation",              # the researcher recommends an experiment
+        intervention_class="experiment",
+        created_tick=tick, run_id=Path(run_dir).name, source=RESEARCHER_SOURCE,
+        rationale=item.statement,
+        expected_benefit={"metric": "researcher/predicted_gain",
+                          "direction": "up",
+                          "magnitude_estimate": float(magnitude)},
+        confidence=0.5,
+        supporting_observations=list(evidence_refs),
+        estimated_cost={"human_hours": 0.5,
+                        "gpu_hours": float(item.experiment.get("cost", 1.0))},
+        risks=[],
+        success_criteria={"metric": "researcher/predicted_gain",
+                          "threshold": 0.0, "eval_window_ticks": 20_000},
+        target=item.ref,                # dedup key = the question id
+        provenance={
+            "evidence_bundle_hash": bundle_hash,
+            "generator_id": f"researcher:agenda:{ranker_id}",
+            "agenda_score": float(item.score),
+            "agenda_decomposition": d,
+            "predicted_gain": item.predicted_gain,
+            "hypothesis_links": list(item.hypothesis_links),
+            "experiment": item.experiment,
+        },
+    )
+
+
+def emit_agenda(
+    items: list[AgendaItem], questions: list[Question], run_dir: str | Path,
+    *, ranker_id: str = "v1", bundle_hash: str = "", tick: int = 0,
+) -> list[Proposal]:
+    """Emit each ranked question item into the queue as an experiment
+    proposal, deduped by (type=evaluation, target=question id) so repeated
+    sleep-phase passes never duplicate. Returns the newly emitted proposals
+    (proposal-kind agenda items are already in the queue and are skipped)."""
+    ev_by_ref = {q.id: q.evidence_refs for q in questions}
+    existing = {(p.type, p.target) for p in load_all(run_dir)}
+    emitted: list[Proposal] = []
+    for item in items:
+        if item.kind != "question":
+            continue
+        key = ("evaluation", item.ref)
+        if key in existing:
+            continue
+        proposal = agenda_item_to_proposal(
+            item, run_dir, ranker_id=ranker_id, bundle_hash=bundle_hash,
+            evidence_refs=ev_by_ref.get(item.ref, []), tick=tick)
+        save_proposal(proposal, run_dir)
+        existing.add(key)
+        emitted.append(proposal)
+    return emitted
+
+
 # ------------------------------------------------------------------ output
 
 
-def write_agenda(
-    items: list[AgendaItem], run_dir: str | Path, tick: int, top: int = 10
-) -> tuple[Path, Path]:
+def _render_score(p: Proposal) -> float:
+    """Ranking score for research_agenda.md: the stored agenda score for
+    researcher items; |magnitude| x confidence for co-listed generator
+    proposals (matching rank_v1's proposal value term)."""
+    if "agenda_score" in p.provenance:
+        return float(p.provenance["agenda_score"])
+    return abs(p.expected_benefit.get("magnitude_estimate", 0.0)) * p.confidence
+
+
+def render_agenda_md(run_dir: str | Path, tick: int | None = None,
+                     top: int = 10) -> Path:
+    """Render research_agenda.md FROM the unified queue (stage-C3): all
+    PENDING proposals, sorted by score. Source is deliberately never
+    printed, so a generator proposal's ledger/logs_only origin cannot leak
+    through this artifact (blind review stays intact)."""
     out_dir = Path(run_dir) / "researcher"
     out_dir.mkdir(parents=True, exist_ok=True)
-    json_path = out_dir / f"agenda_{tick:012d}.json"
-    json_path.write_text(json.dumps([asdict(i) for i in items], indent=2),
-                         encoding="utf-8")
+    pending = [p for p in load_all(run_dir) if p.status == "pending"]
+    pending.sort(key=lambda p: (-_render_score(p), p.id))
 
-    lines = [f"# Research agenda @ tick {tick}", "",
-             "The single top-level research artifact: what the agent does "
-             "not understand, and which experiment reduces that uncertainty "
-             "most efficiently. Nothing here executes; the human picks.", ""]
-    for rank, item in enumerate(items[:top], start=1):
-        d = item.decomposition
-        lines += [
-            f"## {rank}. [{item.kind}] {item.statement}",
-            "",
-            f"- experiment: `{json.dumps(item.experiment)}`",
-            f"- score {item.score:.4f} = value {d['value']:.3f} "
-            f"x tractability {d['tractability']:.3f} "
-            f"x novelty {d['novelty']:.3f} / cost {d['cost']:.2f}",
-        ]
-        if item.predicted_gain is not None:
-            lines.append(f"- predicted gain (EIG v2): {item.predicted_gain:.4f}")
-        if item.hypothesis_links:
+    header = "# Research agenda" + (f" @ tick {tick}" if tick is not None else "")
+    lines = [header, "",
+             "The single top-level research artifact, generated from the "
+             "proposal queue: what the agent does not understand and which "
+             "experiment reduces that uncertainty most efficiently, alongside "
+             "the rule-generator recommendations. Nothing here executes; the "
+             "human picks. (Source is intentionally omitted — blind review.)",
+             ""]
+    for rank, p in enumerate(pending[:top], start=1):
+        prov = p.provenance
+        lines += [f"## {rank}. [{p.intervention_class}] {p.rationale[:160]}", ""]
+        d = prov.get("agenda_decomposition")
+        if d:
+            lines.append(
+                f"- score {_render_score(p):.4f} = value {d['value']:.3f} "
+                f"x tractability {d['tractability']:.3f} "
+                f"x novelty {d['novelty']:.3f} / cost {d['cost']:.2f}")
+        else:
+            lines.append(f"- score {_render_score(p):.4f} "
+                         f"(type `{p.type}`, confidence {p.confidence:.2f})")
+        if prov.get("experiment"):
+            lines.append(f"- experiment: `{json.dumps(prov['experiment'])}`")
+        if prov.get("predicted_gain") is not None:
+            lines.append(f"- predicted gain (EIG v2): {prov['predicted_gain']:.4f}")
+        if prov.get("hypothesis_links"):
             lines.append(f"- a result would move: "
-                         f"{', '.join(item.hypothesis_links)}")
+                         f"{', '.join(prov['hypothesis_links'])}")
         lines.append("")
     md_path = out_dir / "research_agenda.md"
     md_path.write_text("\n".join(lines), encoding="utf-8")
-    return json_path, md_path
+    return md_path
+
+
+def write_agenda(
+    items: list[AgendaItem], run_dir: str | Path, tick: int,
+    *, questions: list[Question] | None = None, ranker_id: str = "v1",
+    bundle_hash: str = "", top: int = 10,
+) -> tuple[list[Proposal], Path]:
+    """Emit the ranked question items into the queue and render
+    research_agenda.md from it. Returns (emitted proposals, md path).
+
+    Replaces the old parallel agenda_<tick>.json artifact: the queue is now
+    the single source of truth (the dashboard reads it too)."""
+    emitted = emit_agenda(items, questions or [], run_dir,
+                          ranker_id=ranker_id, bundle_hash=bundle_hash, tick=tick)
+    md_path = render_agenda_md(run_dir, tick=tick, top=top)
+    return emitted, md_path

@@ -15,30 +15,63 @@ from viz.dashboard import (
 )
 
 
+def _agenda_proposal(pid: str, target: str, statement: str, score: float,
+                     predicted_gain: float | None = None,
+                     hyp_links: list[str] | None = None) -> dict:
+    """A researcher-emitted experiment proposal as it lands in the queue
+    (stage-C3): the agenda score/decomposition live in provenance."""
+    return {
+        "schema_version": 2, "id": pid, "type": "evaluation",
+        "intervention_class": "experiment", "created_tick": 2000,
+        "run_id": "run-a", "source": "researcher", "rationale": statement,
+        "expected_benefit": {"metric": "researcher/predicted_gain",
+                             "direction": "up",
+                             "magnitude_estimate": predicted_gain or score},
+        "confidence": 0.5, "supporting_observations": [],
+        "estimated_cost": {"human_hours": 0.5, "gpu_hours": 2.0}, "risks": [],
+        "success_criteria": {"metric": "researcher/predicted_gain",
+                             "threshold": 0.0, "eval_window_ticks": 20000},
+        "status": "pending", "target": target,
+        "provenance": {"agenda_score": score,
+                       "agenda_decomposition": {"value": 1.0,
+                           "tractability": 1.0, "novelty": 1.0, "cost": 2.0},
+                       "predicted_gain": predicted_gain,
+                       "hypothesis_links": hyp_links or [],
+                       "experiment": {"name": "directed_visit", "cost": 2.0}},
+    }
+
+
 @pytest.fixture()
 def run_dir(tmp_path: Path) -> Path:
     run = tmp_path / "run-a"
     rdir = run / "researcher"
     rdir.mkdir(parents=True)
 
-    # Two agendas: the loader must pick the LATEST.
-    (rdir / "agenda_000000001000.json").write_text(json.dumps([
-        {"id": "agenda-old", "kind": "question", "ref": "q-old",
-         "statement": "stale", "experiment": {}, "score": 0.1,
-         "decomposition": {}}]), encoding="utf-8")
-    (rdir / "agenda_000000002000.json").write_text(json.dumps([
-        {"id": "agenda-q-1", "kind": "question", "ref": "q-1",
-         "statement": "what are the dynamics of region (1, 1)?",
-         "experiment": {"name": "directed_visit", "cost": 2.0},
-         "score": 0.5,
-         "decomposition": {"value": 1.0, "tractability": 1.0,
-                           "novelty": 1.0, "cost": 2.0},
-         "hypothesis_links": ["hyp-region-1-1"], "predicted_gain": 0.32},
-        {"id": "agenda-prop-1", "kind": "proposal", "ref": "prop-abc",
-         "statement": "lower the lr", "experiment": {"name": "proposal_ticket"},
-         "score": 0.2, "decomposition": {"value": 0.4, "tractability": 0.5,
-                                         "novelty": 1.0, "cost": 1.0}},
-    ]), encoding="utf-8")
+    # The agenda is now the unified queue: researcher experiment proposals,
+    # ranked by provenance.agenda_score (loader must sort, not assume order).
+    pdir = run / "proposals"
+    pdir.mkdir(parents=True)
+    (pdir / "prop-agendalower001.json").write_text(json.dumps(
+        _agenda_proposal("prop-agendalower001", "prop-abc", "lower the lr",
+                         score=0.2)), encoding="utf-8")
+    (pdir / "prop-agendatop00001.json").write_text(json.dumps(
+        _agenda_proposal("prop-agendatop00001", "q-1",
+                         "what are the dynamics of region (1, 1)?",
+                         score=0.5, predicted_gain=0.32,
+                         hyp_links=["hyp-region-1-1"])), encoding="utf-8")
+    # A co-listed rule-generator proposal (no agenda_score) must be IGNORED
+    # by the agenda loader — it belongs to the proposals page.
+    (pdir / "prop-generator00001.json").write_text(json.dumps({
+        "schema_version": 2, "id": "prop-generator00001",
+        "type": "hyperparameter", "intervention_class": "config",
+        "created_tick": 1, "run_id": "run-a", "source": "ledger",
+        "rationale": "knob", "expected_benefit": {"metric": "m",
+            "direction": "up", "magnitude_estimate": 0.1}, "confidence": 0.5,
+        "supporting_observations": [], "estimated_cost": {"human_hours": 0,
+            "gpu_hours": 0}, "risks": [], "success_criteria": {"metric": "m",
+            "threshold": 0, "eval_window_ticks": 1}, "status": "pending",
+        "provenance": {"generator_id": "propose_hyperparameter"}},
+    ), encoding="utf-8")
 
     hdir = rdir / "hypotheses"
     hdir.mkdir()
@@ -64,13 +97,14 @@ def run_dir(tmp_path: Path) -> Path:
     return run
 
 
-def test_agenda_loader_picks_latest_and_keeps_order(run_dir: Path) -> None:
+def test_agenda_loader_reads_queue_ranked_by_score(run_dir: Path) -> None:
     table = load_agenda_table(run_dir)
-    assert list(table["ref"]) == ["q-1", "prop-abc"]  # agenda order, not score-resorted
+    # Ranked by agenda_score (0.5 > 0.2); the generator proposal is excluded.
+    assert list(table["ref"]) == ["q-1", "prop-abc"]
     assert list(table["rank"]) == [1, 2]
     assert table.iloc[0]["predicted_gain"] == pytest.approx(0.32)
     assert "hyp-region-1-1" in table.iloc[0]["hypothesis_links"]
-    assert "stale" not in set(table["statement"])  # older agenda ignored
+    assert "knob" not in set(table["statement"])  # generator proposal excluded
 
 
 def test_agenda_loader_empty_run(tmp_path: Path) -> None:

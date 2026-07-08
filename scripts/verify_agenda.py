@@ -83,11 +83,30 @@ def main() -> int:
               if f"hyp-capability-success-{MOVE_E}" in i.hypothesis_links]
     assert linked, "top items carry no link to the contradicted hypothesis"
 
-    json_path, md_path = write_agenda(items, run_dir, tick=max_tick)
-    assert json_path.exists() and md_path.exists()
+    # Emit the ranked questions into the SHARED proposal queue (stage-C3)
+    # and render research_agenda.md FROM it. The bundle hash is the
+    # provenance stamp; build it from the same run's evidence store.
+    from evidence import EvidenceStore
+
+    bundle_hash = EvidenceStore(run_dir).bundle("ledger").content_hash
+    emitted, md_path = write_agenda(items, run_dir, tick=max_tick,
+                                    questions=questions, ranker_id="v1",
+                                    bundle_hash=bundle_hash)
+    assert emitted, "no experiment proposals emitted into the queue"
+    exp = [p for p in emitted if p.intervention_class == "experiment"
+           and p.source == "researcher"]
+    assert len(exp) == len(emitted), "agenda emitted a non-experiment proposal"
+    assert all(p.provenance["evidence_bundle_hash"] == bundle_hash for p in exp)
+    assert md_path.exists()
     md = md_path.read_text(encoding="utf-8")
     assert "score" in md and "would move" in md
-    print(f"\nagenda written: {json_path.name}, {md_path.name}")
+    # A second pass must not duplicate (dedup by type+target).
+    again, _ = write_agenda(items, run_dir, tick=max_tick,
+                            questions=questions, ranker_id="v1",
+                            bundle_hash=bundle_hash)
+    assert again == [], "agenda re-emitted duplicates on a second pass"
+    print(f"\n{len(emitted)} agenda proposals emitted; {md_path.name} rendered "
+          f"from the queue; dedup holds on re-run")
     print("verify_agenda OK")
     return 0
 
