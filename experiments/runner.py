@@ -6,6 +6,7 @@ analysis (see experiments/batteries/*.py and experiments/metrics.py).
 from __future__ import annotations
 
 import copy
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from typing import Any
 import numpy as np
 import torch
 
+from experiments.metrics import realized_benefit_ab, success_criteria_hit
 from training.ppo import PPOTrainer
 from world.engine import NUM_ACTIONS
 
@@ -131,6 +133,182 @@ def run_condition(
     return pre_series, post_series
 
 
+# ------------------------------------------------------ evaluation ladder
+# stage-C4. Two tiers, one shared A/B core:
+#   tier 0 (--ladder runs/<id>): automatic seeded smoke-A/B over every
+#           PENDING config-knob proposal, marked evaluation=smoke_ab — a
+#           cheap screen the human triggers in batch.
+#   tier 1 (--ticket <id>):      the fuller A/B for a human-APPROVED
+#           proposal (longer eval window), marked evaluation=ab.
+# Both also score two fixed INDEPENDENT metrics (world-model loss, reward)
+# beside the proposal's own criterion, both apply the degenerate-control
+# guard (realized_benefit_ab -> NaN when the control has no variance), and
+# both flag criteria trivially entailed by the knob.
+
+# Independent metrics scored on every evaluation, regardless of the
+# proposal's own criterion: PPO vs circadian name wm-loss differently, so
+# each is a candidate list resolved to whichever tag the run actually logged.
+INDEPENDENT_METRICS: dict[str, tuple[str, ...]] = {
+    "wm_loss": ("loss/wm", "sleep/wm_total"),
+    "reward": ("reward/rollout",),
+}
+
+# Criteria trivially entailed by the knob itself (the proposal_quality
+# ANALYSIS caveat, results/20260708-1808/ANALYSIS.md): lowering
+# rssm.free_nats mechanically lowers the KL it is measured against, so a
+# KL-metric success criterion is near-tautological — "KL went down after we
+# lowered the KL floor" is not evidence the world model improved. Grows as
+# more knob/metric tautologies are found.
+def tautology_flag(proposal: Any) -> str | None:
+    change = proposal.proposed_change or {}
+    metric = proposal.success_criteria.get("metric", "")
+    if change.get("config_path") == "rssm.free_nats" and metric in ("rssm/kl", "sleep/kl"):
+        return ("success criterion is the KL the free_nats knob directly "
+                "clamps — near-tautological (proposal_quality ANALYSIS caveat); "
+                "read the independent wm_loss/reward columns instead")
+    return None
+
+
+def _apply_change(cfg: dict[str, Any], change: dict[str, Any]) -> dict[str, Any]:
+    """Return a deep copy of cfg with change['config_path'] (dotted) set."""
+    out = copy.deepcopy(cfg)
+    node = out
+    keys = change["config_path"].split(".")
+    for k in keys[:-1]:
+        node = node.setdefault(k, {})
+    node[keys[-1]] = change["new_value"]
+    return out
+
+
+def _needs_sleep(proposal: Any) -> bool:
+    """Circadian trainer needed when the metric or the knob is sleep/RSSM-side."""
+    metric = proposal.success_criteria["metric"]
+    path = (proposal.proposed_change or {}).get("config_path", "")
+    return metric.startswith(("sleep/", "competence/")) or path.startswith(
+        ("rssm.", "ledger."))
+
+
+def _load_run_cfg(run_dir: Path, config_path: str | None) -> dict[str, Any]:
+    from world.config import load_config
+
+    cfg_file = run_dir / "config.json"
+    if config_path is not None:
+        cfg = load_config(config_path)
+    elif cfg_file.exists():
+        cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
+    else:
+        cfg = load_config("configs/smoke.yaml")
+    cfg.setdefault("run", {})["assert_improvement"] = False
+    return cfg
+
+
+def _eval_run(cfg: dict[str, Any], ticks: int, run_root: str,
+              needs_sleep: bool) -> Path:
+    """Train one short eval run and return its dir. Monkeypatched in tests."""
+    from training.loggers import create_run_dir
+
+    cfg = copy.deepcopy(cfg)
+    cfg["ppo"]["total_steps"] = ticks
+    cfg.setdefault("run", {})["assert_improvement"] = False
+    eval_dir = Path(create_run_dir(run_root))
+    if needs_sleep:
+        from training.sleep import CircadianTrainer
+
+        cfg["agent"]["core"] = "rssm"
+        CircadianTrainer(cfg, run_dir=eval_dir).train()
+    else:
+        PPOTrainer(cfg, run_dir=eval_dir).train()
+    return eval_dir
+
+
+def _series(run_dir: Path, metric: str) -> np.ndarray:
+    """The recorded scalar series for a metric (empty if absent).
+    Monkeypatched in tests."""
+    from viz.dashboard import load_tb_scalars
+
+    scalars = load_tb_scalars(run_dir)
+    return (np.asarray(scalars[metric][1], dtype=float)
+            if metric in scalars else np.zeros(0))
+
+
+def _resolve(run_dir: Path, candidates: tuple[str, ...]) -> np.ndarray:
+    for tag in candidates:
+        s = _series(run_dir, tag)
+        if s.size:
+            return s
+    return np.zeros(0)
+
+
+def _independent_ab(control_dir: Path, treated_dir: Path) -> dict[str, float]:
+    """A/B benefit on the two fixed independent metrics (control-std units;
+    NaN under the degenerate-control guard)."""
+    out: dict[str, float] = {}
+    for name, cands in INDEPENDENT_METRICS.items():
+        control = _resolve(control_dir, cands)
+        treated = _resolve(treated_dir, cands)
+        out[name] = (float(realized_benefit_ab(treated, control))
+                     if control.size and treated.size else float("nan"))
+    return out
+
+
+def evaluate_ab(proposal: Any, cfg: dict[str, Any], eval_ticks: int,
+                evaluation_label: str, eval_run_root: str) -> dict[str, Any]:
+    """Shared A/B core for both tiers: seeded control vs the knob applied,
+    benefit in control-std units on the proposal's own metric plus the two
+    independent metrics, with the tautology flag. Degenerate control -> NaN."""
+    metric = proposal.success_criteria["metric"]
+    direction = proposal.expected_benefit.get("direction", "up")
+    needs_sleep = _needs_sleep(proposal)
+    control_dir = _eval_run(cfg, eval_ticks, eval_run_root, needs_sleep)
+    treated_dir = _eval_run(_apply_change(cfg, proposal.proposed_change),
+                            eval_ticks, eval_run_root, needs_sleep)
+    control, treated = _series(control_dir, metric), _series(treated_dir, metric)
+    benefit = (realized_benefit_ab(treated, control)
+               if control.size and treated.size else float("nan"))
+    if direction == "down" and not np.isnan(benefit):
+        benefit = -benefit
+    hit = (success_criteria_hit(treated, float(proposal.success_criteria["threshold"]),
+                                direction, window=len(treated))
+           if treated.size else False)
+    return {
+        "metric": metric, "benefit_normalized": float(benefit),
+        "met_success_criteria": bool(hit), "evaluation": evaluation_label,
+        "direction": direction,
+        "independent_metrics": _independent_ab(control_dir, treated_dir),
+        "tautological_criterion": tautology_flag(proposal),
+        "control_run": control_dir.name, "treated_run": treated_dir.name,
+        "eval_ticks": eval_ticks,
+    }
+
+
+def run_ladder(run_dir: str | Path, config_path: str | None = None,
+               eval_ticks: int | None = None,
+               eval_run_root: str = "runs") -> list[Any]:
+    """Tier-0: auto seeded smoke-A/B over every PENDING config-knob proposal.
+    Marks each evaluation=smoke_ab and status=evaluated (a cheap automatic
+    screen — experiment/architecture proposals and already-decided records
+    are left for the human-gated tier-1 ticket path)."""
+    from proposals.schema import load_all, save_proposal
+
+    run_dir = Path(run_dir)
+    cfg = _load_run_cfg(run_dir, config_path)
+    ticks = int(eval_ticks
+                or cfg.get("evaluation_ladder", {}).get("tier0_eval_ticks", 2048))
+    evaluated: list[Any] = []
+    for proposal in load_all(run_dir):
+        if proposal.status != "pending":
+            continue
+        if proposal.intervention_class != "config" or not proposal.proposed_change:
+            continue
+        rb = evaluate_ab(proposal, cfg, ticks, "smoke_ab", eval_run_root)
+        proposal.realized_benefit = rb
+        proposal.status = "evaluated"
+        proposal.linked_experiment_id = rb["treated_run"]
+        save_proposal(proposal, run_dir)
+        evaluated.append(proposal)
+    return evaluated
+
+
 # ---------------------------------------------------------------- tickets
 # python -m experiments.runner --ticket <proposal-id> --run-dir runs/<id>
 #
@@ -148,11 +326,11 @@ def evaluate_ticket(
     config_path: str | None = None,
     eval_run_root: str = "runs",
 ) -> dict[str, Any]:
-    """Run the ticket's evaluation experiment and close the loop."""
-    import json
-
+    """Tier-1: run an APPROVED ticket's evaluation and close the loop. A
+    knob proposal gets the full A/B (evaluation=ab); a non-knob experiment
+    proposal gets the single-run threshold check (evaluation=threshold),
+    both with the two independent metrics recorded alongside."""
     from proposals.schema import load_proposal, save_proposal
-    from world.config import load_config
 
     run_dir = Path(run_dir)
     record_path = run_dir / "proposals" / f"{ticket_id}.json"
@@ -165,51 +343,37 @@ def evaluate_ticket(
     criteria = proposal.success_criteria
     metric = criteria["metric"]
     ticks = int(eval_ticks or criteria["eval_window_ticks"])
+    cfg = _load_run_cfg(run_dir, config_path)
 
-    cfg_file = run_dir / "config.json"
-    if config_path is not None:
-        cfg = load_config(config_path)
-    elif cfg_file.exists():
-        cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
+    if proposal.proposed_change:
+        # Full A/B (control vs knob applied), independent metrics + tautology.
+        rb = evaluate_ab(proposal, cfg, ticks, "ab", eval_run_root)
+        proposal.linked_experiment_id = rb["treated_run"]
     else:
-        cfg = load_config("configs/smoke.yaml")
-    cfg["ppo"]["total_steps"] = ticks
-    cfg["run"]["assert_improvement"] = False
+        # Non-knob experiment: one treated run, threshold on the own metric,
+        # independent metric MEANS (no control to normalize against).
+        eval_dir = _eval_run(cfg, ticks, eval_run_root, _needs_sleep(proposal))
+        observed_s = _series(eval_dir, metric)
+        observed = float(np.mean(observed_s)) if observed_s.size else float("nan")
+        direction = proposal.expected_benefit.get("direction", "up")
+        threshold = float(criteria["threshold"])
+        met = (False if np.isnan(observed)
+               else (observed >= threshold) if direction == "up"
+               else observed <= threshold)
+        indep = {name: (float(np.mean(_resolve(eval_dir, cands)))
+                        if _resolve(eval_dir, cands).size else float("nan"))
+                 for name, cands in INDEPENDENT_METRICS.items()}
+        rb = {
+            "metric": metric, "observed": observed, "threshold": threshold,
+            "direction": direction, "met_success_criteria": bool(met),
+            "evaluation": "threshold", "independent_metrics": indep,
+            "tautological_criterion": tautology_flag(proposal),
+            "eval_run": eval_dir.name, "eval_ticks": ticks,
+        }
+        proposal.linked_experiment_id = eval_dir.name
 
-    from training.loggers import create_run_dir
-
-    eval_dir = create_run_dir(eval_run_root)
-    needs_sleep_metrics = metric.startswith(("sleep/", "competence/"))
-    if needs_sleep_metrics:
-        from training.sleep import CircadianTrainer
-
-        cfg["agent"]["core"] = "rssm"
-        trainer: Any = CircadianTrainer(cfg, run_dir=eval_dir)
-        trainer.train()
-    else:
-        trainer = PPOTrainer(cfg, run_dir=eval_dir)
-        trainer.train()
-
-    from viz.dashboard import load_tb_scalars
-
-    scalars = load_tb_scalars(eval_dir)
-    if metric not in scalars:
-        observed = float("nan")
-    else:
-        observed = float(np.mean(scalars[metric][1]))
-    direction = proposal.expected_benefit.get("direction", "up")
-    threshold = float(criteria["threshold"])
-    met = (observed >= threshold) if direction == "up" else (observed <= threshold)
-    if np.isnan(observed):
-        met = False
-
-    proposal.realized_benefit = {
-        "metric": metric, "observed": observed, "threshold": threshold,
-        "direction": direction, "met_success_criteria": bool(met),
-        "eval_run": Path(eval_dir).name, "eval_ticks": ticks,
-    }
+    proposal.realized_benefit = rb
     proposal.status = "evaluated"
-    proposal.linked_experiment_id = Path(eval_dir).name
     save_proposal(proposal, run_dir)
     return proposal.realized_benefit
 
@@ -218,13 +382,34 @@ def _main() -> int:
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Execute an approved proposal ticket (human-run)."
+        description="Proposal evaluation ladder (human-run). Use --ladder "
+                    "runs/<id> for the tier-0 batch smoke-A/B over config "
+                    "knobs, or --ticket <id> for a tier-1 approved proposal."
     )
-    parser.add_argument("--ticket", required=True)
-    parser.add_argument("--run-dir", required=True)
+    parser.add_argument("--ladder", metavar="RUN_DIR", default=None,
+                        help="tier-0: batch smoke-A/B all pending config knobs")
+    parser.add_argument("--ticket", default=None,
+                        help="tier-1: evaluate one approved proposal")
+    parser.add_argument("--run-dir", default=None,
+                        help="run dir for --ticket (--ladder takes it directly)")
     parser.add_argument("--eval-ticks", type=int, default=None)
     parser.add_argument("--config", default=None)
     args = parser.parse_args()
+
+    if args.ladder:
+        evaluated = run_ladder(args.ladder, config_path=args.config,
+                               eval_ticks=args.eval_ticks)
+        print(f"tier-0 ladder: {len(evaluated)} config-knob proposal(s) "
+              f"smoke-A/B evaluated")
+        for p in evaluated:
+            rb = p.realized_benefit
+            taut = " [TAUTOLOGICAL]" if rb.get("tautological_criterion") else ""
+            print(f"  {p.id} {p.target}: benefit {rb['benefit_normalized']:+.3f} "
+                  f"wm_loss {rb['independent_metrics']['wm_loss']:+.3f} "
+                  f"reward {rb['independent_metrics']['reward']:+.3f}{taut}")
+        return 0
+    if not args.ticket or not args.run_dir:
+        parser.error("provide --ladder RUN_DIR, or --ticket <id> --run-dir <dir>")
     result = evaluate_ticket(args.ticket, args.run_dir, args.eval_ticks, args.config)
     print(f"realized_benefit: {result}")
     return 0

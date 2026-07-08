@@ -278,6 +278,16 @@ alarm level on the accumulated statistic S (~5 sigma of excess). S grows
 per CHECK, so replay cadence scales its rate; defaults assume the
 standard cadence ~= window/4 geometry (scripts/verify_registry.py).
 
+### `evaluation_ladder` (stage-C4)
+
+| key              | base | smoke | full |
+|------------------|------|-------|------|
+| tier0_eval_ticks | 2048 | same  | same |
+
+Tier-0 (`python -m experiments.runner --ladder runs/<id>`) smoke-A/Bs each
+config knob for this many env steps; tier-1 uses each proposal's own
+`eval_window_ticks`.
+
 ## Scale-up path
 
 smoke → base (2M steps) → full (hidden 384, num_envs 32, 10M steps). Change

@@ -79,3 +79,26 @@ The flagship comparison lives in
 `experiments/batteries/proposal_quality.py`; its hypothesis (ledger beats
 logs_only on benefit and calibration) is stated in every report header and
 answered honestly either way.
+
+## Evaluation ladder (`experiments/runner.py`, stage-C4)
+
+Two tiers over one shared A/B core (both human-invoked; neither lives in
+`proposals/`, which never executes):
+
+- **tier 0 — `python -m experiments.runner --ladder runs/<id>`**: an
+  automatic seeded smoke-A/B over every PENDING `intervention_class=config`
+  proposal (short `evaluation_ladder.tier0_eval_ticks` eval runs), marked
+  `evaluation=smoke_ab`. The cheap screen; the human triggers the batch.
+- **tier 1 — `--ticket <id>`**: the fuller A/B for a human-APPROVED
+  proposal (its own `eval_window_ticks`), marked `evaluation=ab` for knobs
+  or `evaluation=threshold` for non-knob experiments.
+
+Both tiers ALSO score two fixed **independent** metrics — world-model loss
+and reward — beside the proposal's own criterion, so a win on a self-serving
+criterion is visible next to metrics the knob does not directly move. Both
+apply the **degenerate-control guard** (`realized_benefit_ab` → NaN when the
+control has no variance). Both set `tautological_criterion` when the
+criterion is trivially entailed by the knob (seed rule: `rssm.free_nats`
+knobs judged on `rssm/kl`/`sleep/kl` — the proposal_quality ANALYSIS caveat).
+`recalibrate_confidence(history, tier=...)` bins tier-0 and tier-1 results
+separately: a smoke pass and a full run are different measurements.

@@ -583,17 +583,25 @@ class GeneratorSuite:
         return fired
 
 
-def recalibrate_confidence(history: list[Proposal],
-                           bins: int = 5) -> Callable[[float], float] | None:
+def recalibrate_confidence(history: list[Proposal], bins: int = 5,
+                           tier: str | None = None) -> Callable[[float], float] | None:
     """Binned hit-rate mapping from heuristic confidence to realized success.
 
     Requires >= 20 proposals with realized_benefit; returns None (keep
     heuristics) below that. A proposal 'hit' iff realized_benefit reports
     it met its own success_criteria.
+
+    ``tier`` (stage-C4) restricts the history to one evaluation tier
+    (realized_benefit.evaluation, e.g. "smoke_ab" for tier-0, "ab"/"threshold"
+    for tier-1) so the cheap automatic screen and the fuller human-gated
+    A/B are calibrated SEPARATELY — a tier-0 smoke pass and a tier-1 run are
+    different measurements and must not share a bin.
     """
     evaluated = [p for p in history
                  if p.realized_benefit is not None
-                 and "met_success_criteria" in p.realized_benefit]
+                 and "met_success_criteria" in p.realized_benefit
+                 and (tier is None
+                      or p.realized_benefit.get("evaluation") == tier)]
     if len(evaluated) < 20:
         return None
     conf = np.array([p.confidence for p in evaluated])

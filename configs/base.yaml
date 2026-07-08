@@ -190,3 +190,7 @@ researcher:                    # additive (stage-8): post-hoc analysis layer onl
     #                            shifts; noise below k never accumulates)
     cusum_h_threshold: 5.0     # decision threshold on S (standard SPC choice:
     #                            ~5 sigma of accumulated excess before alarm)
+
+evaluation_ladder:             # stage-C4 (experiments/runner.py --ladder)
+  tier0_eval_ticks: 2048       # short seeded smoke-A/B per config knob;
+  #                              tier-1 uses each proposal's own eval_window_ticks
