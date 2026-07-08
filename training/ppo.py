@@ -45,6 +45,7 @@ from ledger.body_model import (
 from training.attribution_eval import AttributionAccuracyTracker, ground_truth_label
 from training.checkpoints import load_checkpoint, prune_checkpoints, save_checkpoint
 from training.loggers import JsonlRunLogger, TBLogger, write_viz_state
+from ledger.competence import CompetenceTracker
 from ledger.mirror import PROBING, MirrorMonitor
 from ledger.reliability import ReliabilityModel, compare_summaries
 from memory.episodic import EpisodicMemory
@@ -257,6 +258,21 @@ class PPOTrainer:
                 cfg.get("mirror", {}) or {}, num_envs=n,
                 world_size=cfg["world"]["size"],
             )
+
+        # Level-6 competence tracker (stage-7a): per-region rolling
+        # self-assessment fed from detached per-tick observations. Reports
+        # are emitted every sleep phase (CircadianTrainer) or on checkpoint
+        # save (PPO-only runs) and are read-only to everything except the
+        # proposal layer and the dashboard.
+        comp_cfg = cfg.get("competence", {}) or {}
+        self.competence = CompetenceTracker(
+            world_size=cfg["world"]["size"],
+            region_size=comp_cfg.get("region_size", 8),
+            ema_decay=comp_cfg.get("ema_decay", 0.99),
+            progress_window=comp_cfg.get("progress_window", 20),
+            degrade_ratio=comp_cfg.get("degrade_ratio", 1.5),
+            min_samples=comp_cfg.get("min_samples", 50),
+        )
         world_size = cfg["world"]["size"]
         self.epistemic_map = np.zeros((world_size, world_size), dtype=np.float64)
         self.epistemic_count = np.zeros((world_size, world_size), dtype=np.int64)
@@ -583,8 +599,28 @@ class PPOTrainer:
                 for ev in info.get("events", []):
                     if ev.get("type") in _LEVER_EVENT_TYPES:
                         self._lever_events.append(dict(ev))
+            # Competence tracker (stage-7a): detached per-tick observations.
+            # wm loss proxy = per-tick posterior/prior KL (the per-step
+            # world-model NLL component); nan under a GRU core.
+            comp_surprise = (
+                self.model.core.surprise(embed, h_in) if self.is_rssm else None
+            )
+            p_success = (
+                body_out["success_prob"].gather(1, action_idx).squeeze(-1)
+            )
+            comp_brier = (p_success - buf["real_success"][t]) ** 2
+            for i, info in enumerate(infos):
+                self.competence.update_tick(
+                    pos=tuple(info["pos"]),
+                    wm_loss=(float(comp_surprise[i]) if comp_surprise is not None
+                             else float("nan")),
+                    body_brier=float(comp_brier[i]),
+                    reward=float(rewards[i]),
+                )
+
             if self.memory_enabled:
-                mem_surprise = self.model.core.surprise(embed, h_in)
+                mem_surprise = comp_surprise if comp_surprise is not None \
+                    else self.model.core.surprise(embed, h_in)
                 grid_np = grid.cpu().numpy()
                 for i, (info, mem) in enumerate(zip(infos, self.memories)):
                     if dones[i] > 0:
@@ -628,6 +664,7 @@ class PPOTrainer:
         _, next_value = self.model.heads(features)
         buf["next_value"] = next_value
 
+        self.competence.snapshot_progress()
         self.global_step += rollout_len * n
         return buf
 
@@ -1088,6 +1125,7 @@ class PPOTrainer:
             "memories": [m.state_dict() for m in self.memories],
             "last_pos": list(self._last_pos),
             "last_tick": list(self._last_tick),
+            "competence_state": self.competence.state_dict(),
             "reliability_state": (
                 self.reliability.reliability_state_dict()
                 if self.reliability is not None else None
@@ -1096,6 +1134,12 @@ class PPOTrainer:
         out = save_checkpoint(
             path, self.model, self.opt, self.global_step, self.cfg, extra=extra
         )
+        # PPO-only runs have no sleep phase: emit the competence report at
+        # checkpoint cadence instead (CircadianTrainer emits per sleep).
+        if self.run_dir is not None:
+            report = self.competence.report(self.global_step, self.run_dir.name)
+            if report.regions:
+                self.competence.write_report(report, self.run_dir)
         self._last_ckpt_step = self.global_step
         keep = self.cfg["checkpoints"].get("keep_last", 0)
         if keep and out.parent.exists():
@@ -1143,4 +1187,6 @@ class PPOTrainer:
             self._last_tick = list(ckpt.extra["last_tick"])
         if self.reliability is not None and ckpt.extra.get("reliability_state"):
             self.reliability.load_reliability_state_dict(ckpt.extra["reliability_state"])
+        if "competence_state" in ckpt.extra:
+            self.competence.load_state_dict(ckpt.extra["competence_state"])
         self._obs = self.vec.observe()

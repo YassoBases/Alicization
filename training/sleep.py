@@ -142,6 +142,7 @@ class CircadianTrainer:
         self.sleep_enabled: bool = self.rcfg.get("sleep", True)
         self.env_steps = 0
         self._sleep_windows_done = 0
+        self.last_competence_report = None
 
         # --- stage-4c: forecaster (own optimizer) + macro-plan arbiter -----
         lcfg = cfg["ledger"]
@@ -586,6 +587,29 @@ class CircadianTrainer:
             for mem, info in zip(self._inner.memories, self._inner._last_infos):
                 dropped += mem.prune(info["tick"])
             agg["sleep/memory_pruned"] = float(dropped)
+
+        # Competence report (stage-7a): one per sleep phase, with replay
+        # coverage from the buffer's stored (normalized) positions.
+        filled = self.replay._filled
+        replay_pos = (
+            self.replay.position[:, :filled].reshape(-1, 2) if filled else None
+        )
+        report = self._inner.competence.report(
+            tick=self.env_steps,
+            run_id=self.run_dir.name if self.run_dir else "unnamed",
+            replay_positions=replay_pos,
+            world_size=self.cfg["world"]["size"],
+        )
+        self.last_competence_report = report
+        if self.run_dir is not None and report.regions:
+            self._inner.competence.write_report(report, self.run_dir)
+        agg["competence/regions_reported"] = float(len(report.regions))
+        agg["competence/regions_degrading"] = float(
+            sum(r.adaptation_status == "degrading" for r in report.regions)
+        )
+        agg["competence/regions_mid_adaptation"] = float(
+            sum(r.adaptation_status == "mid-adaptation" for r in report.regions)
+        )
         self.sleep_metrics_history.append(agg)
         return agg
 

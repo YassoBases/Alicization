@@ -22,6 +22,13 @@ policy as inputs.
 - All experiment levers (capability_shift, ghost events, region volatility, resets)
   are injected by world config the agent cannot observe.
 - Every metric that evaluates a forecast reports a baseline (identity predictor).
+- PROPOSALS ARE DATA, NEVER CODE: nothing under proposals/ or review/ may execute,
+  import execution machinery, or write outside runs/<id>/proposals/ and
+  experiments/tickets/. A human implements every approved change by hand. Tests
+  enforce this (tests/test_proposals_no_execution.py).
+- The simulated continuity metric NEVER couples to process lifetime, shutdown, or
+  researcher actions. It is a dependent variable inside the sandbox — computed from
+  run logs only, present in no loss, reward, or policy input. Tests enforce this.
 
 ## Stack & conventions
 - Python 3.11, PyTorch, numpy. pip install --break-system-packages if needed.
