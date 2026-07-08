@@ -1,0 +1,18 @@
+run dir: runs_8c\20260708-182555
+env_steps 2048  reward/rollout +0.041  wm -58.610  sps 284
+env_steps 4096  reward/rollout -0.261  wm -107.207  sps 267
+env_steps 6144  reward/rollout -0.231  wm -215.284  sps 228
+env_steps 8192  reward/rollout -0.239  wm -335.889  sps 87
+env_steps 10240  reward/rollout -0.026  wm -432.206  sps 85
+env_steps 12288  reward/rollout -0.218  wm -490.394  sps 192
+
+v1 order: ['q-world-18-22', 'q-world-4-10', 'q-world-27-20']
+v2 order: ['q-world-27-20', 'q-world-18-22', 'q-world-4-10']
+  q-world-27-20: predicted_gain=0.00009 score=0.00002
+  q-world-18-22: predicted_gain=0.00007 score=0.00002
+  q-world-4-10: predicted_gain=0.00007 score=0.00002
+
+region (0, 1): disagreement=0.002597 reduction=0.0270
+
+3/3 items rescored by EIG
+verify_eig OK

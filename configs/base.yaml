@@ -178,3 +178,8 @@ run:
   assert_improvement: false
   jsonl_log: true              # additive: per-tick JSONL event log (env 0 stream)
   viz_dump_every: 512          # additive: live-viewer state dump interval (ticks)
+
+researcher:                    # additive (stage-8): post-hoc analysis layer only
+  ranker: v2                   # agenda ranker: v1 heuristic | v2 EIG (ablation pair)
+  visit_steps: 15              # imagined-rollout length for directed-visit EIG
+  probe_n: 32                  # probe-batch size for capability EIG
