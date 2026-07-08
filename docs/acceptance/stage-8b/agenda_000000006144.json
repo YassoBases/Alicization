@@ -1,0 +1,159 @@
+[
+  {
+    "id": "agenda-q-capability-3",
+    "kind": "question",
+    "ref": "q-capability-3",
+    "statement": "is capability (action 3) degraded or mis-modeled? success rate shifted 7.1 sd between recent windows",
+    "experiment": {
+      "name": "probe_action_batch",
+      "action": 3,
+      "n": 32,
+      "cost": 1.0
+    },
+    "score": 0.5,
+    "decomposition": {
+      "value": 1.0,
+      "tractability": 0.5,
+      "novelty": 1.0,
+      "cost": 1.0
+    },
+    "hypothesis_links": [],
+    "predicted_gain": null
+  },
+  {
+    "id": "agenda-q-violation-hyp-capability-success-2",
+    "kind": "question",
+    "ref": "q-violation-hyp-capability-success-2",
+    "statement": "standing assumption contradicted: success rate of action 2 is stable \u2014 what changed?",
+    "experiment": {
+      "name": "probe_action_batch",
+      "action": 2,
+      "n": 32,
+      "cost": 1.0
+    },
+    "score": 0.5,
+    "decomposition": {
+      "value": 1.0,
+      "tractability": 0.5,
+      "novelty": 1.0,
+      "cost": 1.0
+    },
+    "hypothesis_links": [
+      "hyp-capability-success-2"
+    ],
+    "predicted_gain": null
+  },
+  {
+    "id": "agenda-q-violation-hyp-capability-success-3",
+    "kind": "question",
+    "ref": "q-violation-hyp-capability-success-3",
+    "statement": "standing assumption contradicted: success rate of action 3 is stable \u2014 what changed?",
+    "experiment": {
+      "name": "probe_action_batch",
+      "action": 3,
+      "n": 32,
+      "cost": 1.0
+    },
+    "score": 0.5,
+    "decomposition": {
+      "value": 1.0,
+      "tractability": 0.5,
+      "novelty": 1.0,
+      "cost": 1.0
+    },
+    "hypothesis_links": [
+      "hyp-capability-success-3"
+    ],
+    "predicted_gain": null
+  },
+  {
+    "id": "agenda-q-world-28-29",
+    "kind": "question",
+    "ref": "q-world-28-29",
+    "statement": "what are the dynamics of region (3, 3) (cell 29,28)? ensemble disagreement is at 100% of the map peak",
+    "experiment": {
+      "name": "directed_visit",
+      "region": [
+        3,
+        3
+      ],
+      "cost": 2.0
+    },
+    "score": 0.25,
+    "decomposition": {
+      "value": 1.0,
+      "tractability": 0.5,
+      "novelty": 1.0,
+      "cost": 2.0
+    },
+    "hypothesis_links": [],
+    "predicted_gain": null
+  },
+  {
+    "id": "agenda-q-world-7-21",
+    "kind": "question",
+    "ref": "q-world-7-21",
+    "statement": "what are the dynamics of region (0, 2) (cell 21,7)? ensemble disagreement is at 100% of the map peak",
+    "experiment": {
+      "name": "directed_visit",
+      "region": [
+        0,
+        2
+      ],
+      "cost": 2.0
+    },
+    "score": 0.24911263317192578,
+    "decomposition": {
+      "value": 0.9964505326877031,
+      "tractability": 0.5,
+      "novelty": 1.0,
+      "cost": 2.0
+    },
+    "hypothesis_links": [],
+    "predicted_gain": null
+  },
+  {
+    "id": "agenda-q-world-16-9",
+    "kind": "question",
+    "ref": "q-world-16-9",
+    "statement": "what are the dynamics of region (2, 1) (cell 9,16)? ensemble disagreement is at 100% of the map peak",
+    "experiment": {
+      "name": "directed_visit",
+      "region": [
+        2,
+        1
+      ],
+      "cost": 2.0
+    },
+    "score": 0.24892656806916308,
+    "decomposition": {
+      "value": 0.9957062722766523,
+      "tractability": 0.5,
+      "novelty": 1.0,
+      "cost": 2.0
+    },
+    "hypothesis_links": [],
+    "predicted_gain": null
+  },
+  {
+    "id": "agenda-q-capability-2",
+    "kind": "question",
+    "ref": "q-capability-2",
+    "statement": "is capability (action 2) degraded or mis-modeled? success rate shifted 1.3 sd between recent windows",
+    "experiment": {
+      "name": "probe_action_batch",
+      "action": 2,
+      "n": 32,
+      "cost": 1.0
+    },
+    "score": 0.12902461295665896,
+    "decomposition": {
+      "value": 0.2580492259133179,
+      "tractability": 0.5,
+      "novelty": 1.0,
+      "cost": 1.0
+    },
+    "hypothesis_links": [],
+    "predicted_gain": null
+  }
+]

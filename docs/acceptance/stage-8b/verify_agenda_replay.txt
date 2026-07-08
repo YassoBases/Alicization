@@ -1,0 +1,18 @@
+7 questions generated:
+  [world_uncertainty] what are the dynamics of region (3, 3) (cell 29,28)? ensemble disagreement is at 100% of t
+  [world_uncertainty] what are the dynamics of region (0, 2) (cell 21,7)? ensemble disagreement is at 100% of th
+  [world_uncertainty] what are the dynamics of region (2, 1) (cell 9,16)? ensemble disagreement is at 100% of th
+  [capability_gap] is capability (action 3) degraded or mis-modeled? success rate shifted 7.1 sd between rece
+  [capability_gap] is capability (action 2) degraded or mis-modeled? success rate shifted 1.3 sd between rece
+  [assumption_violation] standing assumption contradicted: success rate of action 2 is stable — what changed?
+  [assumption_violation] standing assumption contradicted: success rate of action 3 is stable — what changed?
+
+top 5:
+  1. 0.500 [question] is capability (action 3) degraded or mis-modeled? success rate shifted 7.1 sd be
+  2. 0.500 [question] standing assumption contradicted: success rate of action 2 is stable — what chan
+  3. 0.500 [question] standing assumption contradicted: success rate of action 3 is stable — what chan
+  4. 0.250 [question] what are the dynamics of region (3, 3) (cell 29,28)? ensemble disagreement is at
+  5. 0.249 [question] what are the dynamics of region (0, 2) (cell 21,7)? ensemble disagreement is at 
+
+agenda written: agenda_000000006144.json, research_agenda.md
+verify_agenda OK
