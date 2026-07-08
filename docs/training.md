@@ -264,9 +264,28 @@ reported vs the no-mirror ablation.
 
 ## Scale-up path
 
-smoke → base (2M steps, hours on a laptop) → full (hidden 384, num_envs 32, 10M
-steps, overnight). Change one axis at a time; if reward collapses after a
-scale-up, the usual culprits are `seq_len` vs. episode structure and `lr`.
+smoke → base (2M steps) → full (hidden 384, num_envs 32, 10M steps). Change
+one axis at a time; if reward collapses after a scale-up, the usual culprits
+are `seq_len` vs. episode structure and `lr`.
+
+Expected wall-clock. CPU numbers are MEASURED on the dev laptop (Windows,
+CPU-only torch; sps = env ticks/s across envs, from actual runs of this
+repo). GPU numbers are ESTIMATES: these models are ~1–2M params and the
+bottleneck is the Python env loop, so a laptop GPU buys roughly 1.5–3x on
+the update-heavy paths and almost nothing on env stepping — vectorize first,
+buy speed with AMP last.
+
+| config | steps | trainer, core | measured CPU sps | CPU wall-clock | laptop-GPU estimate |
+|--------|-------|---------------|------------------|----------------|---------------------|
+| smoke | 20k | PPO, gru | ~800–1,100 | ~30–60 s | no meaningful gain |
+| smoke | 20k | PPO, rssm | ~250–400 | ~1.5–2 min | ~1 min |
+| smoke | 20k | circadian, rssm (+100 sleep grad steps/window) | ~150–300 | ~2.5–5 min | ~2 min |
+| base | 2M | PPO, gru | ~800–1,100 | ~35–70 min | ~30 min |
+| base | 2M | PPO/circadian, rssm | ~200–400 | ~1.5–3 h | ~1 h |
+| full | 10M | circadian, rssm (hidden 384, 32 envs) | ~150–300 (untested at this width) | overnight (~10–18 h) | ~4–8 h |
+
+(base/full RSSM rows extrapolate from smoke-scale sps on the same machine;
+first-run numbers should be recorded here when a base-scale run lands.)
 
 ## Episodes
 
