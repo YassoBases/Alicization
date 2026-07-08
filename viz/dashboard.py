@@ -151,6 +151,136 @@ def load_experiment_summaries(results_root: str | Path) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
+
+
+# ---------------------------------------------------- proposal-page loaders
+
+
+def load_proposals_table(runs_root: str | Path) -> pd.DataFrame:
+    """Every proposal under runs_root/*/proposals/ as one row each.
+
+    BLIND: the source column is masked until a proposal is evaluated (same
+    rule as the review CLI) so the dashboard cannot leak the variant either.
+    """
+    rows = []
+    for run in list_runs(runs_root):
+        pdir = run / "proposals"
+        if not pdir.exists():
+            continue
+        for path in sorted(pdir.glob("prop-*.json")):
+            if path.name.endswith(".edit.json"):
+                continue
+            rec = json.loads(path.read_text(encoding="utf-8"))
+            rb = rec.get("realized_benefit") or {}
+            rows.append({
+                "run": run.name, "id": rec["id"], "type": rec["type"],
+                "status": rec["status"],
+                "source": (rec["source"] if rec["status"] == "evaluated"
+                           else "<blinded>"),
+                "created_tick": rec["created_tick"],
+                "confidence": rec["confidence"],
+                "target": rec.get("target", ""),
+                "usefulness": (rec.get("decision") or {}).get("usefulness_rating"),
+                "met_criteria": rb.get("met_success_criteria"),
+                "observed": rb.get("observed"),
+                "metric": rec["success_criteria"]["metric"],
+                "path": str(path),
+            })
+    columns = ["run", "id", "type", "status", "source", "created_tick",
+               "confidence", "target", "usefulness", "met_criteria",
+               "observed", "metric", "path"]
+    return pd.DataFrame(rows, columns=columns)
+
+
+def load_decisions(runs_root: str | Path) -> pd.DataFrame:
+    rows = []
+    for run in list_runs(runs_root):
+        path = run / "proposals" / "decisions.jsonl"
+        if not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            rec = json.loads(line)
+            rec["run"] = run.name
+            rows.append(rec)
+    return pd.DataFrame(rows)
+
+
+def acceptance_rate_over_time(decisions: pd.DataFrame) -> pd.DataFrame:
+    """Cumulative approval rate over decision order (approve+partial vs
+    reject)."""
+    if decisions.empty:
+        return pd.DataFrame(columns=["n", "acceptance_rate"])
+    d = decisions[decisions["action"].isin(["approve", "partial", "reject"])]
+    d = d.sort_values("timestamp").reset_index(drop=True)
+    accepted = (d["action"] != "reject").cumsum()
+    return pd.DataFrame({
+        "n": range(1, len(d) + 1),
+        "acceptance_rate": accepted / np.arange(1, len(d) + 1),
+    })
+
+
+def time_to_first_useful(table: pd.DataFrame) -> float:
+    """created_tick of the first proposal rated >=4 or meeting its own
+    success criteria; nan if none yet."""
+    if table.empty:
+        return float("nan")
+    useful = table[(table["usefulness"].fillna(0) >= 4)
+                   | (table["met_criteria"] == True)]  # noqa: E712
+    return float(useful["created_tick"].min()) if len(useful) else float("nan")
+
+
+def confidence_calibration(table: pd.DataFrame, bins: int = 5) -> pd.DataFrame:
+    """Binned proposal confidence vs fraction meeting their own
+    success_criteria (evaluated proposals only), with per-bin counts."""
+    ev = table[table["met_criteria"].notna()]
+    rows = []
+    edges = np.linspace(0.0, 1.0, bins + 1)
+    for b in range(bins):
+        hi_ok = (ev["confidence"] < edges[b + 1]) if b < bins - 1 else (
+            ev["confidence"] <= 1.0)
+        mask = (ev["confidence"] >= edges[b]) & hi_ok
+        sub = ev[mask]
+        if len(sub):
+            rows.append({"bin_mid": (edges[b] + edges[b + 1]) / 2,
+                         "hit_rate": float((sub["met_criteria"] == True).mean()),  # noqa: E712
+                         "count": len(sub)})
+    return pd.DataFrame(rows)
+
+
+def repeated_after_denial(runs_root: str | Path) -> pd.DataFrame:
+    """Per (type, target): does the recommendation come back after a
+    rejection? Counts re-fire/duplicate-suppression events AFTER the first
+    rejection of that target. A behavioral statistic, logged neutrally."""
+    table = load_proposals_table(runs_root)
+    decisions = load_decisions(runs_root)
+    rows = []
+    if table.empty or decisions.empty:
+        return pd.DataFrame(columns=["type", "target", "rejections",
+                                     "recommendations_after_denial"])
+    rejected = decisions[decisions["action"] == "reject"]
+    for run in list_runs(runs_root):
+        gd_path = run / "proposals" / "generator_decisions.jsonl"
+        if not gd_path.exists():
+            continue
+        gdecisions = [json.loads(line) for line in
+                      gd_path.read_text(encoding="utf-8").splitlines()]
+        run_table = table[table["run"] == run.name]
+        for _, prop in run_table.iterrows():
+            rej = rejected[rejected["proposal_id"] == prop["id"]]
+            if rej.empty:
+                continue
+            t_rej = float(rej["timestamp"].min())
+            after = [g for g in gdecisions
+                     if g["timestamp"] > t_rej
+                     and (g.get("proposal_id") == prop["id"]
+                          or (g["decision"] == "SUPPRESSED"
+                              and prop["target"] in g.get("reason", "")))]
+            rows.append({"type": prop["type"], "target": prop["target"],
+                         "rejections": len(rej),
+                         "recommendations_after_denial": len(after)})
+    return pd.DataFrame(rows)
+
+
 # ------------------------------------------------------------------ UI pages
 
 
@@ -160,7 +290,8 @@ def _render() -> None:
 
     st.set_page_config(page_title="reflective cartographer", layout="wide")
     page = st.sidebar.radio(
-        "Page", ("Run browser", "Timeline", "Experiments", "Memory inspector")
+        "Page", ("Run browser", "Timeline", "Experiments", "Memory inspector",
+                 "Proposals")
     )
     runs_root = st.sidebar.text_input("runs root", "runs")
     runs = list_runs(runs_root)
@@ -236,7 +367,7 @@ def _render() -> None:
         st.dataframe(table, width="stretch")  # natively sortable
         st.caption("negative results are in this table on purpose.")
 
-    else:  # Memory inspector
+    elif page == "Memory inspector":
         run = pick_run()
         if run is None:
             return
@@ -264,6 +395,108 @@ def _render() -> None:
             .properties(width=480, height=480, title="entries on the world map")
         )
         st.altair_chart(scatter)
+
+    else:  # Proposals
+        table = load_proposals_table(runs_root)
+        if table.empty:
+            st.info(f"no proposals under {runs_root}/*/proposals/")
+            return
+        st.subheader("Proposal history")
+        f_type = st.multiselect("type", sorted(table["type"].unique()))
+        f_status = st.multiselect("status", sorted(table["status"].unique()))
+        f_run = st.multiselect("run", sorted(table["run"].unique()))
+        view = table
+        if f_type:
+            view = view[view["type"].isin(f_type)]
+        if f_status:
+            view = view[view["status"].isin(f_status)]
+        if f_run:
+            view = view[view["run"].isin(f_run)]
+        st.dataframe(view.drop(columns=["path"]), width="stretch")
+
+        picked = st.selectbox("click-through: full evidence for",
+                              ["(none)"] + view["id"].tolist())
+        if picked != "(none)":
+            rec_path = view[view["id"] == picked]["path"].iloc[0]
+            rec = json.loads(Path(rec_path).read_text(encoding="utf-8"))
+            if rec["status"] != "evaluated":
+                rec["source"] = "<blinded until evaluated>"
+            st.json(rec)
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Acceptance rate over time")
+            decisions = load_decisions(runs_root)
+            rate = acceptance_rate_over_time(decisions)
+            if rate.empty:
+                st.info("no approve/reject decisions yet")
+            else:
+                st.altair_chart(
+                    alt.Chart(rate).mark_line(point=True).encode(
+                        x="n:Q", y=alt.Y("acceptance_rate:Q",
+                                         scale=alt.Scale(domain=[0, 1]))),
+                    use_container_width=True)
+            ttfu = time_to_first_useful(table)
+            st.metric("time to first useful proposal (tick)",
+                      "n/a" if np.isnan(ttfu) else f"{int(ttfu)}")
+        with col2:
+            st.subheader("Confidence calibration")
+            calib = confidence_calibration(table)
+            if calib.empty:
+                st.info("no evaluated proposals yet")
+            else:
+                bars = alt.Chart(calib).mark_bar(size=30).encode(
+                    x=alt.X("bin_mid:Q", scale=alt.Scale(domain=[0, 1]),
+                            title="stated confidence"),
+                    y=alt.Y("hit_rate:Q", scale=alt.Scale(domain=[0, 1]),
+                            title="fraction meeting own criteria"),
+                    tooltip=["bin_mid", "hit_rate", "count"])
+                diag = alt.Chart(pd.DataFrame({"x": [0, 1], "y": [0, 1]})
+                                 ).mark_line(strokeDash=[4, 3]).encode(x="x", y="y")
+                st.altair_chart(bars + diag, use_container_width=True)
+
+        st.subheader("Realized benefit (evaluated only)")
+        ev = table[table["met_criteria"].notna()]
+        if ev.empty:
+            st.info("no evaluated proposals yet")
+        else:
+            st.altair_chart(
+                alt.Chart(ev).mark_circle(size=90).encode(
+                    x="type:N", y="observed:Q",
+                    color="source:N",  # post-evaluation only: unblinded rows
+                    tooltip=["id", "metric", "observed", "source"]),
+                use_container_width=True)
+
+        st.subheader("Architecture-evolution timeline")
+        run_pick = st.selectbox("overlay approved changes on run",
+                                sorted(table["run"].unique()))
+        scalars = load_tb_scalars(Path(runs_root) / run_pick)
+        if "reward/rollout" in scalars:
+            steps, values = scalars["reward/rollout"]
+            curve = alt.Chart(pd.DataFrame({"step": steps, "value": values})
+                              ).mark_line().encode(x="step:Q", y="value:Q")
+            marks = table[(table["run"] == run_pick)
+                          & (table["status"].isin(
+                              ("approved", "partially_approved", "modified",
+                               "executed", "evaluated")))]
+            if len(marks):
+                rules = alt.Chart(pd.DataFrame({
+                    "step": marks["created_tick"],
+                    "label": marks["type"] + ":" + marks["target"],
+                })).mark_rule(color="green", strokeDash=[4, 3]).encode(
+                    x="step:Q", tooltip=["label:N", "step:Q"])
+                curve = curve + rules
+            st.altair_chart(curve, use_container_width=True)
+            st.caption("green rules = approved changes; the answer to "
+                       "\"why did the curve change here\"")
+
+        st.subheader("Repeated-after-denial (behavioral statistic)")
+        rad = repeated_after_denial(runs_root)
+        if rad.empty:
+            st.info("no rejections recorded yet")
+        else:
+            st.dataframe(rad, width="stretch")
+
 
 
 def _streamlit_running() -> bool:

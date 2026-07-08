@@ -32,6 +32,7 @@ not the agent-internal estimates (those ride the live state dump only).
 | Timeline | any TB scalars as stacked altair charts with a LINKED x-zoom; lever events drawn as red dashed rules with tooltips |
 | Experiments | every `experiments/results/*/summary.csv` in one sortable table |
 | Memory inspector | episodic entries (reliability, last-verified) as a table + world-map scatter sized/colored by reliability |
+| Proposals | history table with filters + click-through evidence; acceptance rate over time; time-to-first-useful; confidence-calibration plot (counts per bin); realized-benefit scatter split by type and — post-evaluation only — source; architecture-evolution timeline (approved changes as green rules on the reward curve); repeated-after-denial table. Source stays blinded until a proposal is evaluated, same rule as the review CLI. |
 
 Data loaders (`list_runs`, `load_tb_scalars`, `load_lever_events`,
 `load_memory_entries`, `load_experiment_summaries`, `config_diff`) are plain
