@@ -687,3 +687,34 @@ def agenda_stability_kendall_tau(
                 discordant += 1
     total = concordant + discordant
     return float((concordant - discordant) / total) if total else float("nan")
+
+
+# ===========================================================================
+# Evidence-stamp pooling guard (Stage A2). Battery summary rows carry an
+# `evidence_stamp` ("evidence" | "machinery-only") from the MIN_VIABLE_SCALE
+# contract; pooling across that boundary would launder smoke numbers into
+# architecture claims.
+# ===========================================================================
+
+
+def pooled_mean_ci(
+    rows: list[dict], value_key: str, stamp_key: str = "evidence_stamp"
+) -> tuple[float, float]:
+    """mean_and_ci95 over rows[value_key], REFUSING mixed-stamp pools.
+
+    Raises ValueError when both 'evidence' and 'machinery-only' rows are
+    present (aggregate them separately, on purpose, or not at all), or when
+    any row is missing its stamp — an unstamped row's provenance is
+    unknown, which is the same problem.
+    """
+    stamps = {r.get(stamp_key) for r in rows}
+    if None in stamps or "" in stamps:
+        raise ValueError(
+            f"unstamped row(s) in pool: every row needs {stamp_key!r} "
+            "before aggregation (see MIN_VIABLE_SCALE in full_battery.py)")
+    if {"evidence", "machinery-only"} <= stamps:
+        raise ValueError(
+            "refusing to pool machinery-only rows with evidence rows: "
+            "smoke-scale numbers must not average into architecture claims "
+            "(split the pool by evidence_stamp)")
+    return mean_and_ci95([r[value_key] for r in rows])

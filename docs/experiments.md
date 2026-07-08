@@ -58,6 +58,20 @@ spike criterion was uncrossable (results/20260708-1311/ANALYSIS.md). Its
 per-run CSV logs `baseline_q99`, `spike_level`, `teleport_peak_20` and
 their ratio so a missed spike is diagnosable from the CSV alone.
 
+### Minimum-viable-scale contracts (Stage A2)
+
+`MIN_VIABLE_SCALE` in full_battery.py declares, per test, the scale at
+which its premise demonstrably holds (`known_sufficient`, None = unknown —
+never guessed) and where it demonstrably failed (`known_insufficient`),
+each with the finding it came from. The runner stamps every summary row
+`evidence` or `machinery-only` accordingly, and
+`experiments.metrics.pooled_mean_ci` REFUSES to aggregate across that
+boundary (or over unstamped rows). Tests: `tests/test_scale_contracts.py`.
+`scripts/scale_curves.py` (attribution accuracy + forecaster NMSE vs ~5
+log-spaced training budgets, identity baseline drawn) exists to replace
+the remaining unknowns with data; feed its flip points back into the
+table, citing the results directory.
+
 ## Stage acceptance scripts (`scripts/verify_*.py`)
 
 Single-capability acceptance runs with reports preserved under

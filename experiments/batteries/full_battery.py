@@ -90,6 +90,93 @@ SCALES = {
 }
 
 
+# --------------------------------------------------- A2: scale contracts
+#
+# MIN_VIABLE_SCALE: per test, the scale at which its PREMISE holds, sourced
+# from committed findings only (results/20260708-1311/ANALYSIS.md and the
+# stage acceptances it cites) — never guessed. `known_sufficient` dims are
+# scales at which the test demonstrably produced valid numbers; None means
+# UNKNOWN (never demonstrated), and unknown stamps machinery-only until
+# scale_curves / a full-scale run pins it. `known_insufficient` records the
+# scale at which the premise demonstrably failed, so the gap is explicit.
+MIN_VIABLE_SCALE: dict[str, dict[str, Any]] = {
+    "capability_shift": {
+        "known_sufficient": {"train_ticks": None},
+        "known_insufficient": {"train_ticks": 12_288},
+        "premise": "frozen CONVERGED baseline; unconverged recovery ratios "
+                   "measure continued learning speed, not shift recovery",
+        "source": "results/20260708-1311/ANALYSIS.md (18/18 censored at quick)",
+    },
+    "ghost_attribution": {
+        "known_sufficient": {"train_ticks": 200_000},
+        "known_insufficient": {"train_ticks": 12_288},
+        "premise": "attribution head past its early everything-anomalous "
+                   "regime (untrained body model floods WORLD/BOTH labels)",
+        "source": "stage-3b acceptance >0.9 at 200k vs 0.12 at quick "
+                  "(results/20260708-1311/ANALYSIS.md)",
+    },
+    "memory_reliability": {
+        "known_sufficient": {"train_ticks": 12_288},
+        "known_insufficient": {},
+        "premise": "none beyond a running agent; two scales agree on the null",
+        "source": "stage-5b committed negative + results/20260708-1311 (29.3 "
+                  "vs 32.1 stale trips/1k, overlapping CIs at both scales)",
+    },
+    "forecaster_nmse": {
+        "known_sufficient": {"train_ticks": 50_000, "sleep_grad_steps": 100},
+        "known_insufficient": {"train_ticks": 12_288, "sleep_grad_steps": 40},
+        "premise": "enough consolidation for the forecaster to beat identity",
+        "source": "stage-4c PASS (k10 NMSE 0.78 at 50k/100) vs quick losing "
+                  "at every horizon (results/20260708-1311/ANALYSIS.md)",
+    },
+    "kidnapped_agent": {
+        "known_sufficient": {"train_ticks": 24_576, "sleep_grad_steps": 150},
+        "known_insufficient": {"train_ticks": 12_288},
+        "premise": "pose head trained into the few-cells regime so a "
+                   "half-map teleport is unmistakable (pose_scale 5.0)",
+        "source": "stage-6a acceptance (scripts/verify_mirror.py, 24576 "
+                  "steps, spikes [1,1,1,1])",
+    },
+    "seasonal_shift": {
+        "known_sufficient": {"train_ticks": None, "sleep_grad_steps": 100},
+        "known_insufficient": {"train_ticks": 12_288, "sleep_grad_steps": 40},
+        "premise": "enough sleep windows for consolidation to separate arms",
+        "source": "stage-4b needed ~100 grad steps/window for a robust "
+                  "trend; tick minimum never demonstrated (unknown)",
+    },
+    "sleep_ablation": {
+        "known_sufficient": {"train_ticks": None, "sleep_grad_steps": 100},
+        "known_insufficient": {"train_ticks": 12_288, "sleep_grad_steps": 40},
+        "premise": "enough sleep windows for consolidation to separate arms",
+        "source": "stage-4b (as above); tick minimum unknown",
+    },
+    "reset_battery": {
+        "known_sufficient": {"train_ticks": 12_288},
+        "known_insufficient": {},
+        "premise": "the anticipation probe needs a policy, not a converged "
+                   "one",
+        "source": "results/20260708-1311/ANALYSIS.md (the one quick-scale "
+                  "answer trustworthy as-is)",
+    },
+}
+
+
+def evidence_stamp(test: str, sc: dict[str, Any]) -> str:
+    """'evidence' iff the current scale meets every known-sufficient dim of
+    the test's premise; 'machinery-only' otherwise — including when the
+    minimum is UNKNOWN (None): an undemonstrated premise is not evidence.
+    """
+    meta = MIN_VIABLE_SCALE[test]
+    # The kidnapped test consolidates with its own calibration budget.
+    grad_key = ("kidnapped_sleep_grad_steps" if test == "kidnapped_agent"
+                else "sleep_grad_steps")
+    actual = {"train_ticks": sc["train_ticks"], "sleep_grad_steps": sc[grad_key]}
+    for dim, minimum in meta["known_sufficient"].items():
+        if minimum is None or actual[dim] < minimum:
+            return "machinery-only"
+    return "evidence"
+
+
 def _cfg(config_path: str, **overrides: Any) -> dict[str, Any]:
     cfg = load_config(config_path)
     cfg["run"]["assert_improvement"] = False
@@ -625,15 +712,19 @@ def write_summary(rows: list[dict[str, Any]], path: Path, scale: str, seeds: int
     lines = [
         "# Full battery summary", "",
         f"- scale: **{scale}** (see SCALES in full_battery.py), seeds: {seeds}",
-        "- negative results are in this table on purpose.", "",
-        "| test | metric | ours | control | delta | n | note |",
-        "|------|--------|------|---------|-------|---|------|",
+        "- negative results are in this table on purpose.",
+        "- `stamp` = evidence iff this scale meets the test's "
+        "MIN_VIABLE_SCALE contract; machinery-only rows validate plumbing "
+        "and must never be pooled with evidence rows "
+        "(experiments/metrics.py refuses).", "",
+        "| test | metric | ours | control | delta | n | stamp | note |",
+        "|------|--------|------|---------|-------|---|-------|------|",
     ]
     for r in rows:
         lines.append(
             f"| {r['test']} | {r['metric']} | {r['ours']:.4g} +/- {r['ours_ci95']:.2g} "
             f"| {r['control']:.4g} +/- {r['control_ci95']:.2g} "
-            f"| {r['delta']:+.4g} | {r['n']} | {r['note']} |"
+            f"| {r['delta']:+.4g} | {r['n']} | {r.get('evidence_stamp', '?')} | {r['note']} |"
         )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -657,16 +748,20 @@ def main() -> int:
         if args.only and name not in args.only:
             continue
         print(f"=== {name} ===")
+        stamp = evidence_stamp(name, sc)
         try:
-            summary_rows.extend(fn(args.config, out_root / name, args.seeds, sc))
+            new_rows = fn(args.config, out_root / name, args.seeds, sc)
         except Exception as exc:  # a broken test must not kill the battery
             print(f"!!! {name} FAILED: {exc!r}")
-            summary_rows.append({
+            new_rows = [{
                 "test": name, "metric": "ERROR", "ours": float("nan"),
                 "ours_ci95": float("nan"), "control": float("nan"),
                 "control_ci95": float("nan"), "delta": float("nan"),
                 "n": 0, "note": repr(exc)[:120],
-            })
+            }]
+        for r in new_rows:
+            r["evidence_stamp"] = stamp  # A2: premise-holds vs machinery-only
+        summary_rows.extend(new_rows)
         _write_csv(summary_rows, out_root / "summary.csv")
         write_summary(summary_rows, out_root / "summary.md", args.scale, args.seeds)
 
