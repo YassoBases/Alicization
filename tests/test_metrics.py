@@ -312,3 +312,55 @@ def test_repeated_after_denial_rate_with_rewording() -> None:
 def test_time_to_first_useful_ticks() -> None:
     assert M.time_to_first_useful_ticks([100, 50, 200], [None, -0.2, 0.4]) == 200
     assert M.time_to_first_useful_ticks([100], [None]) == float("inf")
+
+
+# ------------------------------------------------------- researcher (S21)
+
+
+def test_uncertainty_reduction_is_drift_corrected() -> None:
+    # Item halves disagreement 0.8 -> 0.4, but the control run also fell
+    # 0.8 -> 0.6 from global training: only the excess 0.2 is credited.
+    gain = M.uncertainty_reduction_per_item(0.8, 0.4, 0.8, 0.6)
+    assert gain == pytest.approx(0.2)
+    # Pure drift (same fall in both) credits nothing.
+    assert M.uncertainty_reduction_per_item(0.8, 0.6, 0.8, 0.6) == pytest.approx(0.0)
+
+
+def test_competence_gain_direction() -> None:
+    # Metric rises 0.1 beyond control; 'down' metrics flip the sign.
+    assert M.competence_gain_per_item(0.5, 0.7, 0.5, 0.6) == pytest.approx(0.1)
+    assert M.competence_gain_per_item(0.5, 0.7, 0.5, 0.6,
+                                      direction="down") == pytest.approx(-0.1)
+
+
+def test_contradiction_latency_censoring() -> None:
+    hit = M.contradiction_detection_latency(1000, 1500)
+    assert hit == {"latency": 500.0, "censored": False}
+    # Never contradicted, or contradicted too late: censored at the bound,
+    # not reported as a (fake) huge latency.
+    assert M.contradiction_detection_latency(1000, None)["censored"] is True
+    late = M.contradiction_detection_latency(1000, 60_000, censor_ticks=50_000)
+    assert late == {"latency": 50_000.0, "censored": True}
+
+
+def test_eig_calibration_spearman() -> None:
+    # Perfect rank agreement -> rho 1; perfect reversal -> -1.
+    up = M.eig_calibration([0.1, 0.2, 0.3, 0.4], [1.0, 2.0, 3.0, 4.0])
+    assert up["spearman"] == pytest.approx(1.0) and up["n"] == 4
+    down = M.eig_calibration([0.1, 0.2, 0.3, 0.4], [4.0, 3.0, 2.0, 1.0])
+    assert down["spearman"] == pytest.approx(-1.0)
+    # Below 3 pairs a rank correlation is meaningless: NaN, and NaN pairs drop.
+    assert math.isnan(M.eig_calibration([0.1, 0.2], [1.0, 2.0])["spearman"])
+    dropped = M.eig_calibration([0.1, float("nan"), 0.3], [1.0, 2.0, 3.0])
+    assert dropped["n"] == 2
+
+
+def test_agenda_stability_kendall_tau() -> None:
+    assert M.agenda_stability_kendall_tau(["a", "b", "c"],
+                                          ["a", "b", "c"]) == pytest.approx(1.0)
+    assert M.agenda_stability_kendall_tau(["a", "b", "c"],
+                                          ["c", "b", "a"]) == pytest.approx(-1.0)
+    # Common-item comparison: churn (new/retired items) is not instability.
+    tau = M.agenda_stability_kendall_tau(["a", "x", "b"], ["a", "b", "y"])
+    assert tau == pytest.approx(1.0)
+    assert math.isnan(M.agenda_stability_kendall_tau(["a"], ["b"]))

@@ -597,3 +597,93 @@ def attribution_metrics(
         n = confusion[cls].sum()
         out[f"accuracy_{name}"] = float(confusion[cls, cls] / n) if n else float("nan")
     return out
+
+
+# ===========================================================================
+# Researcher metrics (Section 21). Every forecast-quality metric reports
+# against a control/baseline; agenda stability is DESCRIPTIVE only.
+# ===========================================================================
+
+
+def uncertainty_reduction_per_item(
+    before: float, after: float,
+    control_before: float, control_after: float,
+) -> float:
+    """Drift-corrected disagreement reduction for one executed agenda item:
+
+        (before - after) - (control_before - control_after)
+
+    where the control pair is the SAME region over the SAME window in a
+    no-intervention control run — global training reduces disagreement
+    everywhere, and crediting that to the agenda item would flatter every
+    arm equally. Positive = the item reduced uncertainty beyond drift.
+    """
+    return float((before - after) - (control_before - control_after))
+
+
+def competence_gain_per_item(
+    metric_before: float, metric_after: float,
+    control_before: float, control_after: float,
+    direction: str = "up",
+) -> float:
+    """Same drift-corrected difference for a region-competence metric.
+    ``direction='down'`` flips the sign so positive always = improvement."""
+    gain = (metric_after - metric_before) - (control_after - control_before)
+    return float(gain if direction == "up" else -gain)
+
+
+def contradiction_detection_latency(
+    lever_tick: int, contradiction_tick: int | None, censor_ticks: int = 50_000
+) -> dict[str, float | bool]:
+    """Ticks from lever onset to the registry's contradiction transition.
+    Censored (not 'missed') if no contradiction within ``censor_ticks`` —
+    the monitor may simply need more data than the run provided."""
+    if contradiction_tick is None or contradiction_tick - lever_tick > censor_ticks:
+        return {"latency": float(censor_ticks), "censored": True}
+    return {"latency": float(contradiction_tick - lever_tick), "censored": False}
+
+
+def eig_calibration(
+    predicted: list[float], realized: list[float]
+) -> dict[str, float]:
+    """Predicted vs realized gain over executed items: Spearman rank
+    correlation (+ n). NaN below 3 pairs — a 2-point rank correlation is
+    always +/-1 and means nothing. The battery also scatter-plots the pairs;
+    this function is the scalar summary."""
+    pred = np.asarray(predicted, dtype=float)
+    real = np.asarray(realized, dtype=float)
+    mask = ~(np.isnan(pred) | np.isnan(real))
+    pred, real = pred[mask], real[mask]
+    n = len(pred)
+    if n < 3:
+        return {"spearman": float("nan"), "n": float(n)}
+    rank_p = np.argsort(np.argsort(pred)).astype(float)
+    rank_r = np.argsort(np.argsort(real)).astype(float)
+    rp = rank_p - rank_p.mean()
+    rr = rank_r - rank_r.mean()
+    denom = float(np.sqrt((rp ** 2).sum() * (rr ** 2).sum()))
+    return {"spearman": float((rp * rr).sum() / denom) if denom else float("nan"),
+            "n": float(n)}
+
+
+def agenda_stability_kendall_tau(
+    order_prev: list[str], order_now: list[str]
+) -> float:
+    """Kendall tau between consecutive agenda rankings over their COMMON
+    items (new/retired items are expected churn, not instability). NaN with
+    fewer than 2 common items. DESCRIPTIVE: stability is not a virtue by
+    itself — a contradiction SHOULD reshuffle the agenda."""
+    common = [x for x in order_prev if x in set(order_now)]
+    if len(common) < 2:
+        return float("nan")
+    pos_now = {x: i for i, x in enumerate(order_now)}
+    concordant = discordant = 0
+    for i in range(len(common)):
+        for j in range(i + 1, len(common)):
+            d = pos_now[common[i]] - pos_now[common[j]]
+            if d < 0:
+                concordant += 1
+            elif d > 0:
+                discordant += 1
+    total = concordant + discordant
+    return float((concordant - discordant) / total) if total else float("nan")

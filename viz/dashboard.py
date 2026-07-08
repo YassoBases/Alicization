@@ -281,6 +281,76 @@ def repeated_after_denial(runs_root: str | Path) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+# -------------------------------------------------- researcher-page loaders
+
+
+def load_agenda_table(run_dir: str | Path) -> pd.DataFrame:
+    """Latest runs/<id>/researcher/agenda_<tick>.json as one row per item
+    (already ranked; row order is agenda order)."""
+    rdir = Path(run_dir) / "researcher"
+    agendas = sorted(rdir.glob("agenda_*.json"))
+    columns = ["rank", "kind", "ref", "statement", "score", "value",
+               "tractability", "novelty", "cost", "predicted_gain",
+               "experiment", "hypothesis_links"]
+    if not agendas:
+        return pd.DataFrame(columns=columns)
+    items = json.loads(agendas[-1].read_text(encoding="utf-8"))
+    rows = []
+    for rank, it in enumerate(items, start=1):
+        d = it.get("decomposition", {})
+        rows.append({
+            "rank": rank, "kind": it["kind"], "ref": it["ref"],
+            "statement": it["statement"], "score": it["score"],
+            "value": d.get("value"), "tractability": d.get("tractability"),
+            "novelty": d.get("novelty"), "cost": d.get("cost"),
+            "predicted_gain": it.get("predicted_gain"),
+            "experiment": json.dumps(it.get("experiment", {})),
+            "hypothesis_links": ", ".join(it.get("hypothesis_links", [])),
+        })
+    return pd.DataFrame(rows, columns=columns)
+
+
+def load_hypotheses_table(run_dir: str | Path) -> pd.DataFrame:
+    """Every persisted hypothesis with its status and transition count."""
+    hdir = Path(run_dir) / "researcher" / "hypotheses"
+    columns = ["id", "scope", "status", "statement", "last_checked",
+               "transitions"]
+    rows = []
+    if hdir.exists():
+        for path in sorted(hdir.glob("*.json")):
+            rec = json.loads(path.read_text(encoding="utf-8"))
+            statement = rec["statement_template"].format(**rec.get("params", {}))
+            rows.append({
+                "id": rec["id"], "scope": rec["scope"],
+                "status": rec["status"], "statement": statement,
+                "last_checked": rec.get("last_checked"),
+                "transitions": len(rec.get("transitions", [])),
+            })
+    return pd.DataFrame(rows, columns=columns)
+
+
+def load_contradiction_events(run_dir: str | Path) -> pd.DataFrame:
+    """contradiction_events.jsonl -> one row per status transition."""
+    path = Path(run_dir) / "researcher" / "contradiction_events.jsonl"
+    columns = ["tick", "hypothesis_id", "from", "to", "statistic", "evidence"]
+    if not path.exists():
+        return pd.DataFrame(columns=columns)
+    rows = [json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines() if line]
+    return pd.DataFrame(rows)[
+        [c for c in columns if rows and c in rows[0]]]
+
+
+def load_executed_items(items_csv: str | Path) -> pd.DataFrame:
+    """items.csv from a researcher_value battery run: executed agenda items
+    with predicted_gain vs realized (drift-corrected) reduction."""
+    path = Path(items_csv)
+    if not path.exists():
+        return pd.DataFrame(columns=["seed", "arm", "region", "reduction",
+                                     "predicted_gain"])
+    return pd.read_csv(path)
+
+
 # ------------------------------------------------------------------ UI pages
 
 
@@ -291,7 +361,7 @@ def _render() -> None:
     st.set_page_config(page_title="reflective cartographer", layout="wide")
     page = st.sidebar.radio(
         "Page", ("Run browser", "Timeline", "Experiments", "Memory inspector",
-                 "Proposals")
+                 "Proposals", "Research Agenda")
     )
     runs_root = st.sidebar.text_input("runs root", "runs")
     runs = list_runs(runs_root)
@@ -395,6 +465,77 @@ def _render() -> None:
             .properties(width=480, height=480, title="entries on the world map")
         )
         st.altair_chart(scatter)
+
+    elif page == "Research Agenda":
+        run = pick_run()
+        if run is None:
+            return
+        agenda = load_agenda_table(run)
+        st.subheader("Top 10 agenda items")
+        if agenda.empty:
+            st.info("no agenda under this run's researcher/ dir yet")
+        else:
+            st.dataframe(agenda.head(10), width="stretch")
+            top = agenda.head(10).melt(
+                id_vars=["rank", "statement"],
+                value_vars=["value", "tractability", "novelty"],
+                var_name="term", value_name="weight")
+            st.altair_chart(
+                alt.Chart(top).mark_bar().encode(
+                    x=alt.X("rank:O", title="agenda rank"),
+                    y="weight:Q", color="term:N",
+                    tooltip=["statement", "term", "weight"]),
+                use_container_width=True)
+            spawned = agenda[agenda["kind"] == "proposal"]
+            if len(spawned):
+                st.caption("agenda items linked to pending proposals: "
+                           + ", ".join(spawned["ref"]))
+
+        st.subheader("Hypotheses")
+        hyps = load_hypotheses_table(run)
+        if hyps.empty:
+            st.info("no hypotheses persisted for this run")
+        else:
+            def _color(status: str) -> str:
+                return {"supported": "background-color: #14452f",
+                        "weakening": "background-color: #7a6008",
+                        "contradicted": "background-color: #6e1b1b",
+                        }.get(status, "")
+            st.dataframe(
+                hyps.style.map(_color, subset=["status"]), width="stretch")
+
+        st.subheader("Contradiction timeline")
+        events = load_contradiction_events(run)
+        if events.empty:
+            st.info("no status transitions recorded")
+        else:
+            st.altair_chart(
+                alt.Chart(events).mark_circle(size=120).encode(
+                    x="tick:Q", y="hypothesis_id:N",
+                    color=alt.Color("to:N", scale=alt.Scale(
+                        domain=["supported", "weakening", "contradicted"],
+                        range=["#2e8b57", "#d4a017", "#c0392b"])),
+                    tooltip=["tick", "hypothesis_id", "to", "evidence"]),
+                use_container_width=True)
+
+        st.subheader("Executed items: predicted vs realized")
+        items_csv = st.text_input(
+            "researcher_value items.csv",
+            "experiments/results/<date>/researcher_value/items.csv")
+        executed = load_executed_items(items_csv)
+        executed = executed[executed["predicted_gain"].notna()] if len(executed) else executed
+        if executed.empty:
+            st.info("point this at a researcher_value battery items.csv "
+                    "to see EIG calibration")
+        else:
+            st.altair_chart(
+                alt.Chart(executed).mark_circle(size=90).encode(
+                    x=alt.X("predicted_gain:Q", title="predicted gain (EIG)"),
+                    y=alt.Y("reduction:Q",
+                            title="realized reduction (drift-corrected)"),
+                    color="arm:N", tooltip=["region", "predicted_gain",
+                                            "reduction", "seed"]),
+                use_container_width=True)
 
     else:  # Proposals
         table = load_proposals_table(runs_root)
