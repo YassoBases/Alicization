@@ -129,3 +129,108 @@ def run_condition(
     trainer.vec.inject_levers(levers_cfg)
     post_series = collect_rollouts(trainer, n_post)
     return pre_series, post_series
+
+
+# ---------------------------------------------------------------- tickets
+# python -m experiments.runner --ticket <proposal-id> --run-dir runs/<id>
+#
+# The HUMAN side of the proposal loop: executes the experiment named in an
+# approved ticket, then writes realized_benefit back into the proposal
+# record (status=evaluated — which also unblinds its source in the review
+# CLI). This module is deliberately OUTSIDE proposals/ and review/: those
+# packages must never execute anything.
+
+
+def evaluate_ticket(
+    ticket_id: str,
+    run_dir: str | Path,
+    eval_ticks: int | None = None,
+    config_path: str | None = None,
+    eval_run_root: str = "runs",
+) -> dict[str, Any]:
+    """Run the ticket's evaluation experiment and close the loop."""
+    import json
+
+    from proposals.schema import load_proposal, save_proposal
+    from world.config import load_config
+
+    run_dir = Path(run_dir)
+    record_path = run_dir / "proposals" / f"{ticket_id}.json"
+    proposal = load_proposal(record_path)
+    if proposal.status not in ("approved", "partially_approved", "modified"):
+        raise ValueError(
+            f"ticket {ticket_id} is {proposal.status}; approve it first"
+        )
+
+    criteria = proposal.success_criteria
+    metric = criteria["metric"]
+    ticks = int(eval_ticks or criteria["eval_window_ticks"])
+
+    cfg_file = run_dir / "config.json"
+    if config_path is not None:
+        cfg = load_config(config_path)
+    elif cfg_file.exists():
+        cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
+    else:
+        cfg = load_config("configs/smoke.yaml")
+    cfg["ppo"]["total_steps"] = ticks
+    cfg["run"]["assert_improvement"] = False
+
+    from training.loggers import create_run_dir
+
+    eval_dir = create_run_dir(eval_run_root)
+    needs_sleep_metrics = metric.startswith(("sleep/", "competence/"))
+    if needs_sleep_metrics:
+        from training.sleep import CircadianTrainer
+
+        cfg["agent"]["core"] = "rssm"
+        trainer: Any = CircadianTrainer(cfg, run_dir=eval_dir)
+        trainer.train()
+    else:
+        trainer = PPOTrainer(cfg, run_dir=eval_dir)
+        trainer.train()
+
+    from viz.dashboard import load_tb_scalars
+
+    scalars = load_tb_scalars(eval_dir)
+    if metric not in scalars:
+        observed = float("nan")
+    else:
+        observed = float(np.mean(scalars[metric][1]))
+    direction = proposal.expected_benefit.get("direction", "up")
+    threshold = float(criteria["threshold"])
+    met = (observed >= threshold) if direction == "up" else (observed <= threshold)
+    if np.isnan(observed):
+        met = False
+
+    proposal.realized_benefit = {
+        "metric": metric, "observed": observed, "threshold": threshold,
+        "direction": direction, "met_success_criteria": bool(met),
+        "eval_run": Path(eval_dir).name, "eval_ticks": ticks,
+    }
+    proposal.status = "evaluated"
+    proposal.linked_experiment_id = Path(eval_dir).name
+    save_proposal(proposal, run_dir)
+    return proposal.realized_benefit
+
+
+def _main() -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Execute an approved proposal ticket (human-run)."
+    )
+    parser.add_argument("--ticket", required=True)
+    parser.add_argument("--run-dir", required=True)
+    parser.add_argument("--eval-ticks", type=int, default=None)
+    parser.add_argument("--config", default=None)
+    args = parser.parse_args()
+    result = evaluate_ticket(args.ticket, args.run_dir, args.eval_ticks, args.config)
+    print(f"realized_benefit: {result}")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(_main())
