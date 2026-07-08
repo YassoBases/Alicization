@@ -28,7 +28,8 @@ BANNED_CALLS = {"exec", "eval", "compile", "__import__"}
 
 def _package_files() -> list[Path]:
     files = []
-    for pkg in ("proposals", "review"):
+    # researcher/ inherits every structural rule verbatim (CLAUDE.md).
+    for pkg in ("proposals", "review", "researcher"):
         pkg_dir = ROOT / pkg
         assert pkg_dir.exists(), f"{pkg}/ package missing"
         files.extend(sorted(pkg_dir.glob("*.py")))
@@ -63,7 +64,7 @@ def test_ledger_competence_is_the_only_project_import() -> None:
     """The one project package the proposal layer may read is
     ledger.competence (a numpy-only, read-only report module) and its own
     sibling modules."""
-    allowed_roots = {"proposals", "review"}
+    allowed_roots = {"proposals", "review", "researcher"}
     for path in _package_files():
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):

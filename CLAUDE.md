@@ -29,6 +29,11 @@ policy as inputs.
 - The simulated continuity metric NEVER couples to process lifetime, shutdown, or
   researcher actions. It is a dependent variable inside the sandbox — computed from
   run logs only, present in no loss, reward, or policy input. Tests enforce this.
+- SCOPE RULE (researcher/): hypotheses and questions may be about the
+  agent-in-the-world and its own models ONLY. Statements about the reviewer, reset
+  schedule, or training infrastructure are rejected at the schema level and tested
+  with adversarial fixtures. All proposal-layer structural rules apply verbatim to
+  researcher/ (data-not-code, confined writes, no world/training imports).
 
 ## Stack & conventions
 - Python 3.11, PyTorch, numpy. pip install --break-system-packages if needed.

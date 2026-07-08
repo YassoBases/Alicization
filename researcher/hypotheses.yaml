@@ -1,0 +1,17 @@
+# Human-added hypotheses, loaded at registry start (researcher/registry.py's
+# load_yaml_hypotheses). Same schema as the dataclass minus schema_version /
+# created_tick; the SCOPE RULE applies on load — statements about the
+# reviewer, reset schedule, or training infrastructure are rejected.
+#
+# Example (commented out — add your own below):
+#
+# - id: hyp-night-forage-cost
+#   statement_template: "night foraging costs more energy than day foraging"
+#   params: {}
+#   scope: world
+#   monitor:
+#     metric_query: "jsonl:action_denergy:action=4"
+#     statistical_test: mean_shift
+#     threshold: 3.0
+#     window: 4000
+#     min_samples: 20

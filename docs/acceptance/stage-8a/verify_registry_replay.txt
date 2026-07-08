@@ -1,0 +1,9 @@
+lever fired at world tick 4501
+
+MOVE_E hypothesis transitions:
+  @4750: supported -> weakening  (mean shift 7.41 sd vs 3.0)
+  @5000: weakening -> contradicted  (mean shift 10.65 sd vs 3.0)
+contradicted at 5000 (lever 4501); 0 pre-lever weakening wobble(s), all recovered
+pre-lever false contradictions (want none): []
+post-lever downstream contradictions (observed, legitimate): [(3, 5250)]
+verify_registry OK
