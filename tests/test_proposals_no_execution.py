@@ -28,8 +28,11 @@ BANNED_CALLS = {"exec", "eval", "compile", "__import__"}
 
 def _package_files() -> list[Path]:
     files = []
-    # researcher/ inherits every structural rule verbatim (CLAUDE.md).
-    for pkg in ("proposals", "review", "researcher"):
+    # researcher/ inherits every structural rule verbatim (CLAUDE.md);
+    # evidence/ (stage-C) is the shared read-only evidence plane and obeys
+    # the same bans — it is imported BY proposals/ and researcher/, so it
+    # must be at least as constrained.
+    for pkg in ("proposals", "review", "researcher", "evidence"):
         pkg_dir = ROOT / pkg
         assert pkg_dir.exists(), f"{pkg}/ package missing"
         files.extend(sorted(pkg_dir.glob("*.py")))
@@ -64,7 +67,10 @@ def test_ledger_competence_is_the_only_project_import() -> None:
     """The one project package the proposal layer may read is
     ledger.competence (a numpy-only, read-only report module) and its own
     sibling modules."""
-    allowed_roots = {"proposals", "review", "researcher"}
+    # evidence/ is the one non-sibling project package these layers may
+    # import (the shared read-only evidence plane); it is itself scanned by
+    # this test, so the allowance does not widen the trust boundary.
+    allowed_roots = {"proposals", "review", "researcher", "evidence"}
     for path in _package_files():
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):

@@ -92,6 +92,25 @@ The stage-2/3 PPO path (`training/ppo.py`, `agent.core: gru` or `rssm`)
 remains the simpler alternative: one on-policy PPO update per rollout, with
 the world-model loss joining PPO's backward pass when the core is RSSM.
 
+## The evidence plane (`evidence/`, stage-C)
+
+One read-only store over a run dir, shared by the proposal generators and
+the researcher. `EvidenceStore(run_dir)` loads the JSONL event log, TB
+scalars, the latest competence report, the config, and a repo snapshot
+`{git_sha, dirty}` (injected, or read from `runs/<id>/repo_snapshot.json`,
+else unknown — the package never runs git; capture lives in
+`experiments/provenance.py`, outside the trust boundary). `store.view(source)`
+returns a source-scoped `EvidenceView` (the pre-stage-C `Evidence`, kept as
+an alias): `logs_only` strips every Ledger-derived scalar and the
+competence report, `ledger` keeps them — the control condition the proposal
+science rests on. `store.bundle(source)` returns an immutable, content-hashed
+`EvidenceBundle`; that hash is the `provenance.evidence_bundle_hash` a
+proposal records (schema v2), and citations may be `tb:<tag>@step=`,
+`competence:…`, or `code:<path>@<sha>#Lx-Ly`. `evidence/` obeys the same
+structural rules as `proposals/`/`researcher/` (data-not-code, import bans,
+read-only) and is scanned by `tests/test_proposals_no_execution.py`;
+`proposals/evidence.py` is a deprecated re-export shim.
+
 ## Config reference
 
 Resolution: YAML with `inherit:` chains (`world/config.py`); the resolved

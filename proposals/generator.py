@@ -26,7 +26,7 @@ from typing import Any, Callable
 
 import numpy as np
 
-from proposals.evidence import Evidence
+from evidence import Evidence
 from proposals.schema import Proposal, proposals_dir, save_proposal
 
 
