@@ -71,9 +71,26 @@ two consecutive checks inside that transient detectability window —
 check cadence, window and `arm_after` must be sized so the window spans
 at least two checks, or a real change is seen once (weakening) and then
 "recovers". The researcher-value battery hit exactly this at quick
-scale (every seed censored) before its geometry was fixed; a
-persistent-change variant (compare against a frozen post-arm baseline
-instead of a sliding prev-window) is the obvious future upgrade.
+scale (every seed censored) before its geometry was fixed.
+
+**The stage-B upgrade — `cusum_frozen_baseline` (default for capability
+templates).** After `arm_after`, the first armed check freezes a
+baseline (mean, std with `std_floor`); each later check standardizes its
+window mean against that frozen baseline and accumulates the one-sided
+CUSUM statistic `S_t = max(0, S_{t-1} + (|z_t| - k_drift))`, violating
+when `S_t > h_threshold` (`researcher.monitors` in configs/base.yaml:
+`cusum_k_drift 0.5`, `cusum_h_threshold 5.0`; detector state persists in
+`Hypothesis.monitor_state`). Because the baseline never slides, a
+persistent change keeps paying into S regardless of when checks land —
+there is no transient detectability window to miss. The status machine
+is unchanged (one violation weakens, a second consecutive one
+contradicts, sticky, one clean check recovers), but with CUSUM the
+second violation is nearly automatic once S crosses h, so escalation
+semantics read **"confirmed persistent"** rather than "caught twice in a
+transient window". `mean_shift` remains selectable per template
+(`researcher.monitors.capability_test`) as the onset-detector ablation.
+Both windows stay bounded above by the check tick on every path (the
+stage-8a future-read fix, regression-tested for CUSUM too).
 
 Human hypotheses go in `researcher/hypotheses.yaml` (same schema, same
 scope validation).

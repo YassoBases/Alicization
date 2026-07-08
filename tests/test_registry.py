@@ -293,3 +293,15 @@ def test_cusum_escalation_means_confirmed_persistent(tmp_path: Path) -> None:
     # Sticky: further checks never leave contradicted.
     registry.check_all(engine, now_tick=400)
     assert h.status == "contradicted"
+
+
+def test_default_hypotheses_default_to_cusum_with_mean_shift_ablation() -> None:
+    default = build_default_hypotheses(world_size=32, num_actions=9)
+    cap = [h for h in default if h.id.startswith("hyp-capability-success-")]
+    assert cap and all(
+        h.monitor["statistical_test"] == "cusum_frozen_baseline" and
+        "k_drift" in h.monitor and "h_threshold" in h.monitor for h in cap)
+    ablation = build_default_hypotheses(world_size=32, num_actions=9,
+                                        capability_test="mean_shift")
+    cap_ab = [h for h in ablation if h.id.startswith("hyp-capability-success-")]
+    assert all(h.monitor["statistical_test"] == "mean_shift" for h in cap_ab)

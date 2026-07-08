@@ -262,6 +262,22 @@ reported vs the no-mirror ablation.
 | log_every          | 1000  | 1000  | 1000  |
 | assert_improvement | false | false | false |
 
+### `researcher.monitors` (stage-B sequential monitors)
+
+| key               | base                  | smoke | full |
+|-------------------|-----------------------|-------|------|
+| capability_test   | cusum_frozen_baseline | same  | same |
+| cusum_k_drift     | 0.5                   | same  | same |
+| cusum_h_threshold | 5.0                   | same  | same |
+
+`capability_test: mean_shift` selects the onset-detector ablation.
+`k_drift` is the per-check allowance in frozen-baseline sigma (SPC
+convention k = delta/2: tuned to accumulate ~1-sigma persistent shifts
+while stationary noise below k never accumulates); `h_threshold` is the
+alarm level on the accumulated statistic S (~5 sigma of excess). S grows
+per CHECK, so replay cadence scales its rate; defaults assume the
+standard cadence ~= window/4 geometry (scripts/verify_registry.py).
+
 ## Scale-up path
 
 smoke → base (2M steps) → full (hidden 384, num_envs 32, 10M steps). Change

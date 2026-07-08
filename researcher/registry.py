@@ -379,10 +379,19 @@ class HypothesisRegistry:
 def build_default_hypotheses(
     world_size: int, num_actions: int, created_tick: int = 0,
     region_size: int = 8, max_regions: int = 16,
+    capability_test: str = "cusum_frozen_baseline",
+    cusum_k_drift: float = 0.5, cusum_h_threshold: float = 5.0,
 ) -> list[Hypothesis]:
     """Auto-population at startup / after each battery: stationarity per
     region, capability stability per action, memory-decay validity,
-    forecaster validity per horizon, calibration stability."""
+    forecaster validity per horizon, calibration stability.
+
+    Capability monitors default to the CUSUM persistent-change detector
+    (stage-B); pass capability_test="mean_shift" for the onset-detector
+    ablation. Callers wire these from configs/base.yaml
+    (researcher.monitors: capability_test / cusum_k_drift /
+    cusum_h_threshold) — the function defaults mirror the config defaults.
+    """
     out: list[Hypothesis] = []
     n_regions = world_size // region_size
     idx = 0
@@ -402,14 +411,20 @@ def build_default_hypotheses(
                 created_tick=created_tick,
             ))
     for action in range(num_actions):
+        monitor: dict[str, Any] = {
+            "metric_query": f"jsonl:action_success:action={action}",
+            "statistical_test": capability_test, "threshold": 3.0,
+            "window": 4000, "min_samples": 20,
+            "arm_after": 2000,  # behavior-coupled: settle first
+        }
+        if capability_test == "cusum_frozen_baseline":
+            monitor.update({"k_drift": cusum_k_drift,
+                            "h_threshold": cusum_h_threshold})
         out.append(Hypothesis(
             schema_version=1, id=f"hyp-capability-success-{action}",
             statement_template="success rate of action {action} is stable",
             params={"action": action}, scope="self_capability",
-            monitor={"metric_query": f"jsonl:action_success:action={action}",
-                     "statistical_test": "mean_shift", "threshold": 3.0,
-                     "window": 4000, "min_samples": 20,
-                     "arm_after": 2000},  # behavior-coupled: settle first
+            monitor=monitor,
             created_tick=created_tick,
         ))
     out.append(Hypothesis(
