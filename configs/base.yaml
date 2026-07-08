@@ -159,6 +159,15 @@ memory:                       # additive (stage-5a): episodic memory
   spatial_sigma: 8.0
   importance_tau: 20000        # recency decay for importance-based pruning
 
+continuity:                   # additive (stage-7d): DEPENDENT variable only
+  window_ticks: 4096           # eval window for the composite
+  weights:                     # component weights (z-scored across the pool)
+    preference_persistence: 1.0
+    revisit_efficiency: 1.0
+    forecaster_nmse_trend: 1.0
+    reliability_ece: 1.0
+    adaptation_half_life: 1.0
+
 checkpoints:
   interval: 50_000
   keep_last: 3

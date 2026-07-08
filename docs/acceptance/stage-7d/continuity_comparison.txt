@@ -1,0 +1,7 @@
+
+condition                 composite  components (mean per window)
+wake+sleep   +0.0244 +/- 0.5201  preference_persistence=+0.917  revisit_efficiency=+0.298  forecaster_nmse_trend=+nan  reliability_ece=-0.124  adaptation_half_life=-379.667
+wake-only    -0.0244 +/- 0.4409  preference_persistence=+0.992  revisit_efficiency=+0.221  forecaster_nmse_trend=+nan  reliability_ece=-0.209  adaptation_half_life=-352.833
+
+difference (wake+sleep - wake-only): +0.0488
+verify_continuity OK (direction reported, not assumed)
