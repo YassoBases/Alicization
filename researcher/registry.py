@@ -28,6 +28,34 @@ Statistical tests:
     ks_2sample   KS statistic between consecutive-window samples > threshold
     mean_shift   |mean(now) - mean(prev)| / (std(prev)+eps) > threshold
     band         fraction of window outside [lo, hi] > threshold
+    cusum_frozen_baseline
+                 sequential detector for PERSISTENT change (stage-B). After
+                 arm_after, the first armed check FREEZES a baseline
+                 (mean, std with std_floor) from its window; every later
+                 check standardizes its window mean against that frozen
+                 baseline, z_t = |mean(now) - mu_0| / sigma_0, and
+                 accumulates the one-sided CUSUM statistic
+                     S_t = max(0, S_{t-1} + (z_t - k_drift)),
+                 violating when S_t > h_threshold. Contrast with
+                 mean_shift's sliding prev-window (the known limitation in
+                 docs/researcher.md): mean_shift is an ONSET detector — it
+                 violates only while the now-window straddles the change
+                 and the prev-window is still clean, so escalation needs
+                 two consecutive checks inside that transient window, and
+                 a real change seen once then suppressed by prev-window
+                 contamination "recovers". CUSUM's baseline never slides,
+                 so a persistent change keeps paying into S regardless of
+                 when checks land; escalation to contradicted therefore
+                 reads "confirmed persistent", and S is nearly monotone
+                 once the change lands (two consecutive violations are
+                 close to automatic after S crosses h). z uses |.|: a
+                 capability shift in either direction violates stability.
+                 Note S accumulates PER CHECK, so the check cadence (and
+                 window overlap between checks) scales its growth rate;
+                 k_drift/h_threshold defaults are set in
+                 configs/base.yaml (researcher.monitors) for the standard
+                 cadence ~= window/4 replay geometry. Detector state
+                 (frozen mu/sigma, S) persists in Hypothesis.monitor_state.
 """
 
 from __future__ import annotations
@@ -68,6 +96,10 @@ class Hypothesis:
     status: str = "supported"
     last_checked: int = -1
     transitions: list[dict[str, Any]] = field(default_factory=list)
+    # Sequential-detector state (cusum_frozen_baseline: frozen mu/sigma,
+    # running S, frozen_at). Persisted with the record; empty for the
+    # window-pair tests. Additive + defaulted, so v1 records load unchanged.
+    monitor_state: dict[str, Any] = field(default_factory=dict)
 
     def statement(self) -> str:
         return self.statement_template.format(**self.params)
@@ -240,6 +272,33 @@ def run_check(h: Hypothesis, engine: QueryEngine, now_tick: int) -> dict[str, An
         frac_out = float(((now_vals < lo) | (now_vals > hi)).mean())
         return {"violated": frac_out > m["threshold"], "statistic": frac_out,
                 "detail": f"{frac_out:.2f} outside [{lo}, {hi}]"}
+    if test == "cusum_frozen_baseline":
+        # Persistent-change detector; see the module docstring for the
+        # contrast with mean_shift's onset-only detectability window.
+        if len(now_vals) < min_n:
+            return {"violated": False, "statistic": float("nan"),
+                    "detail": "insufficient samples"}
+        state = h.monitor_state
+        if "mu" not in state:
+            floor = float(m.get("std_floor", 0.05))
+            state.update({
+                "mu": float(now_vals.mean()),
+                "sigma": max(float(now_vals.std()), floor),
+                "s": 0.0, "frozen_at": now_tick,
+            })
+            return {"violated": False, "statistic": 0.0,
+                    "detail": (f"baseline frozen at {now_tick} "
+                               f"(mu={state['mu']:.3f}, "
+                               f"sigma={state['sigma']:.3f})")}
+        k_drift = float(m.get("k_drift", 0.5))
+        h_threshold = float(m.get("h_threshold", 5.0))
+        z = abs(float(now_vals.mean()) - state["mu"]) / state["sigma"]
+        s = max(0.0, float(state["s"]) + z - k_drift)
+        state["s"] = s
+        return {"violated": s > h_threshold, "statistic": s,
+                "detail": (f"CUSUM S={s:.2f} vs h={h_threshold} "
+                           f"(|z|={z:.2f}, k={k_drift}, "
+                           f"baseline @{state['frozen_at']})")}
     raise ValueError(f"unknown statistical test {test!r}")
 
 
@@ -287,11 +346,14 @@ class HypothesisRegistry:
             # genuinely while the position distribution stabilizes, and
             # flagging that as a capability contradiction is the same
             # calibrate-then-arm failure the mirror had (stage-6a).
-            # BOTH comparison windows must lie past the boundary — a check
-            # at arm_after still drags settling-era data in via the prev
-            # window — so the first armed check is arm_after + 2*window.
+            # EVERY window a check consumes must lie past the boundary:
+            # the two-window tests drag settling-era data in via the prev
+            # window (first armed check arm_after + 2*window); cusum's
+            # baseline freeze and band read one window (arm_after + window).
             arm_after = h.monitor.get("arm_after", 0)
-            if arm_after and now_tick < arm_after + 2 * h.monitor["window"]:
+            n_windows = (2 if h.monitor["statistical_test"]
+                         in ("ks_2sample", "mean_shift") else 1)
+            if arm_after and now_tick < arm_after + n_windows * h.monitor["window"]:
                 continue
             result = run_check(h, engine, now_tick)
             h.last_checked = now_tick
