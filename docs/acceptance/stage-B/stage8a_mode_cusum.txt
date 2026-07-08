@@ -1,0 +1,8 @@
+
+MOVE_E hypothesis transitions:
+  @5000: supported -> weakening  (CUSUM S=5.11 vs h=5.0 (|z|=3.62, k=0.5, baseline @2500))
+  @5250: weakening -> contradicted  (CUSUM S=9.40 vs h=5.0 (|z|=4.79, k=0.5, baseline @2500))
+contradicted at 5250 (lever 4501); 0 pre-lever weakening wobble(s), all recovered
+pre-lever false contradictions (want none): []
+post-lever downstream contradictions (observed, legitimate): [(3, 5750)]
+verify_registry OK

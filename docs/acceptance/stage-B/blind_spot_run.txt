@@ -1,0 +1,20 @@
+  cusum      : contradicted at [2250] (+649 ticks, budget 1500); pre-lever false alarms [] (want none); downstream [(1, 2500), (3, 2500)]
+run dir: runs_8a\20260708-212549 (seed 2, lever 1600)
+env_steps 2048  reward/rollout +0.041  wm -54.879  sps 291
+env_steps 4096  reward/rollout -0.313  wm -54.977  sps 278
+env_steps 6144  reward/rollout -0.192  wm -55.035  sps 278
+env_steps 8192  reward/rollout -0.316  wm -55.050  sps 277
+env_steps 10240  reward/rollout -0.352  wm -55.092  sps 271
+env_steps 12288  reward/rollout -0.334  wm -55.078  sps 237
+env_steps 14336  reward/rollout -0.287  wm -55.140  sps 234
+env_steps 16384  reward/rollout -0.316  wm -55.131  sps 235
+env_steps 18432  reward/rollout -0.250  wm -55.098  sps 228
+env_steps 20480  reward/rollout -0.352  wm -55.164  sps 73
+env_steps 22528  reward/rollout -0.333  wm -55.212  sps 137
+env_steps 24576  reward/rollout -0.335  wm -55.200  sps 179
+
+seed 2 (lever 1601):
+  mean_shift : contradictions [] (want none — blind spot), weakenings @[2500] (transient, recovered)
+  cusum      : contradicted at [2250] (+649 ticks, budget 1500); pre-lever false alarms [] (want none); downstream [(3, 2250)]
+
+verify_registry --blind-spot OK
