@@ -15,18 +15,45 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 TYPES = (
     "retraining", "training_schedule", "hyperparameter", "memory_policy",
     "checkpoint_schedule", "evaluation", "logging_change", "compute_budget",
     "dataset_extension", "visualization",
 )
-SOURCES = ("ledger", "logs_only")
+# What KIND of intervention the proposal is (stage-C2): a config knob, an
+# experiment to run, or an architecture change (stage-D Architect). The
+# evaluation ladder (experiments/runner.py) keys tier-0 auto-A/B off "config".
+INTERVENTION_CLASSES = ("config", "experiment", "architecture")
+# KNOWN sources (the ledger-vs-logs control condition, plus stage-D
+# "architect"); NOT an enforced enum — source is validated non-empty so new
+# generators (e.g. "architect:sonnet") need no schema bump. Blinding keys off
+# status ("not yet evaluated"), never off source membership.
+SOURCES = ("ledger", "logs_only", "architect")
 STATUSES = ("pending", "approved", "partially_approved", "modified",
             "rejected", "postponed", "executed", "evaluated")
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{7,63}$")
+
+
+def _migrate(data: dict[str, Any]) -> dict[str, Any]:
+    """Upgrade an older serialized proposal to the current schema, filling
+    defaults. v1 -> v2: add intervention_class (knob proposals are config
+    interventions, everything else is an experiment), provenance, artifacts."""
+    version = data.get("schema_version", 1)
+    if version == SCHEMA_VERSION:
+        return data
+    if version == 1:
+        data = dict(data)
+        data["schema_version"] = SCHEMA_VERSION
+        data.setdefault("provenance", {})
+        data.setdefault("artifacts", [])
+        data.setdefault(
+            "intervention_class",
+            "config" if data.get("proposed_change") else "experiment")
+        return data
+    raise ValueError(f"cannot migrate proposal schema_version {version!r}")
 
 
 @dataclass
@@ -57,6 +84,15 @@ class Proposal:
     # with no single-knob form (retraining, logging changes, ...). Enables
     # A/B realized-benefit evaluation (Section 17); the human still executes.
     proposed_change: dict[str, Any] | None = None
+    # --- schema v2 (stage-C2) ---
+    intervention_class: str = "config"   # config | experiment | architecture
+    # Reproducibility (standing rule): where this proposal came from.
+    # {evidence_bundle_hash, generator_id} for rule generators; adds
+    # {prompt_hash, model_id} for LLM-drafted ones (stage-D).
+    provenance: dict[str, Any] = field(default_factory=dict)
+    # Run-relative paths to attached data files (e.g. an UNAPPLIED diff).
+    # Never absolute, never containing "..": these live under runs/<id>/.
+    artifacts: list[str] = field(default_factory=list)
 
     # ------------------------------------------------------------ lifecycle
 
@@ -79,8 +115,12 @@ class Proposal:
             raise ValueError(f"unsupported schema_version {self.schema_version}")
         if self.type not in TYPES:
             raise ValueError(f"unknown type {self.type!r}")
-        if self.source not in SOURCES:
-            raise ValueError(f"unknown source {self.source!r}")
+        # source is an OPEN string (v2): validated non-empty, not enum-checked
+        # — blinding keys off status, not off a known-source list.
+        if not isinstance(self.source, str) or not self.source.strip():
+            raise ValueError("source must be non-empty")
+        if self.intervention_class not in INTERVENTION_CLASSES:
+            raise ValueError(f"unknown intervention_class {self.intervention_class!r}")
         if self.status not in STATUSES:
             raise ValueError(f"unknown status {self.status!r}")
         if not 0.0 <= self.confidence <= 1.0:
@@ -96,6 +136,15 @@ class Proposal:
                 raise ValueError(f"estimated_cost missing {key!r}")
         if not isinstance(self.rationale, str) or not self.rationale.strip():
             raise ValueError("rationale must be non-empty text")
+        if not isinstance(self.provenance, dict):
+            raise ValueError("provenance must be a dict")
+        for art in self.artifacts:
+            if not isinstance(art, str) or not art:
+                raise ValueError("artifacts must be non-empty run-relative paths")
+            parts = Path(art).parts
+            if art[:1] in ("/", "\\") or ".." in parts or (
+                    len(art) > 1 and art[1] == ":"):
+                raise ValueError(f"artifact path escapes the run dir: {art!r}")
 
     # ------------------------------------------------------------------ json
 
@@ -104,7 +153,7 @@ class Proposal:
 
     @staticmethod
     def from_json(text: str) -> "Proposal":
-        p = Proposal(**json.loads(text))
+        p = Proposal(**_migrate(json.loads(text)))
         p.validate()
         return p
 

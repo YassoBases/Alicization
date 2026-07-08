@@ -84,3 +84,18 @@ def test_blind_until_evaluated_all_states(tmp_path: Path) -> None:
         assert blind_view(p)["source"] == "<blinded until evaluated>", status
     p = _proposal(run_dir, status="evaluated")
     assert blind_view(p)["source"] == "logs_only"
+
+
+def test_blinding_keys_off_status_not_source_enum(tmp_path: Path) -> None:
+    """v2: source is an open string. Blinding must still hide it while
+    unevaluated (keying off status), and reveal the exact string — even a
+    novel one — once evaluated."""
+    run_dir = tmp_path / "run"
+    p = _proposal(run_dir, status="pending")
+    p.source = "architect:sonnet"       # not in the known-sources list
+    save_proposal(p, run_dir)
+    assert blind_view(ReviewQueue(run_dir).get(p.id))["source"] == \
+        "<blinded until evaluated>"
+    p.status = "evaluated"
+    save_proposal(p, run_dir)
+    assert blind_view(ReviewQueue(run_dir).get(p.id))["source"] == "architect:sonnet"

@@ -62,12 +62,18 @@ class BaseGenerator:
                   observations: list[str], cost: dict[str, float],
                   risks: list[str], criteria: dict[str, Any],
                   proposed_change: dict[str, Any] | None = None) -> Proposal:
+        # A single-knob recommendation is a config intervention; everything
+        # else (retraining, battery runs, logging) is an experiment (v2).
+        intervention_class = "config" if proposed_change else "experiment"
         return Proposal.new(
             type=self.ptype, created_tick=ev.tick, run_id=ev.run_id,
             source=ev.source, rationale=rationale, expected_benefit=benefit,
             confidence=confidence, supporting_observations=observations,
             estimated_cost=cost, risks=risks, success_criteria=criteria,
             target=target, proposed_change=proposed_change,
+            intervention_class=intervention_class,
+            provenance={"evidence_bundle_hash": ev.bundle_hash,
+                        "generator_id": self.name},
         )
 
 

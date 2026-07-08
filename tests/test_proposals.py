@@ -72,10 +72,75 @@ def test_schema_validation_rejects_bad_records() -> None:
     restored = Proposal.from_json(p.to_json())
     assert restored.id == p.id and restored.status == "pending"
 
-    for corrupt in ({"type": "nonsense"}, {"source": "psychic"},
-                    {"confidence": 1.5}, {"rationale": "  "}):
+    for corrupt in ({"type": "nonsense"}, {"source": ""},
+                    {"confidence": 1.5}, {"rationale": "  "},
+                    {"intervention_class": "sideways"}):
         with pytest.raises(ValueError):
             Proposal.new(**{**good, **corrupt})
+
+
+def test_schema_v2_fields_roundtrip() -> None:
+    p = Proposal.new(
+        type="hyperparameter", created_tick=1, run_id="r",
+        source="architect:sonnet",  # open string (v2): not an enum member
+        intervention_class="architecture",
+        rationale="text", expected_benefit={"metric": "m", "direction": "up",
+                                            "magnitude_estimate": 0.1},
+        confidence=0.5, supporting_observations=["code:agent/core_rssm.py@abc#L1-L9"],
+        estimated_cost={"human_hours": 1, "gpu_hours": 1}, risks=[],
+        success_criteria={"metric": "m", "threshold": 0, "eval_window_ticks": 10},
+        provenance={"evidence_bundle_hash": "deadbeef00000000",
+                    "generator_id": "architect", "prompt_hash": "cafe",
+                    "model_id": "claude-x"},
+        artifacts=["architect/diffs/p.diff"],
+    )
+    r = Proposal.from_json(p.to_json())
+    assert r.schema_version == 2
+    assert r.intervention_class == "architecture"
+    assert r.source == "architect:sonnet"
+    assert r.provenance["model_id"] == "claude-x"
+    assert r.artifacts == ["architect/diffs/p.diff"]
+
+
+def test_v1_record_migrates_to_v2_filling_defaults() -> None:
+    v1 = {
+        "schema_version": 1, "id": "prop-legacyrecord01", "type": "retraining",
+        "created_tick": 5, "run_id": "r", "source": "ledger",
+        "rationale": "legacy", "expected_benefit": {"metric": "m",
+            "direction": "up", "magnitude_estimate": 0.1},
+        "confidence": 0.5, "supporting_observations": [],
+        "estimated_cost": {"human_hours": 0, "gpu_hours": 0}, "risks": [],
+        "success_criteria": {"metric": "m", "threshold": 0,
+                             "eval_window_ticks": 10},
+        "status": "pending", "decision": {}, "linked_experiment_id": None,
+        "realized_benefit": None, "target": "region-1-1",
+        "proposed_change": None,
+    }
+    p = Proposal.from_json(json.dumps(v1))
+    assert p.schema_version == 2
+    assert p.intervention_class == "experiment"  # no knob -> experiment
+    assert p.provenance == {} and p.artifacts == []
+
+    v1_knob = {**v1, "id": "prop-legacyknob0001",
+               "proposed_change": {"config_path": "rssm.free_nats",
+                                   "new_value": 0.5}}
+    assert Proposal.from_json(json.dumps(v1_knob)).intervention_class == "config"
+
+
+def test_artifact_paths_must_stay_in_run_dir() -> None:
+    base = dict(
+        type="hyperparameter", created_tick=1, run_id="r", source="ledger",
+        rationale="t", expected_benefit={"metric": "m", "direction": "up",
+                                         "magnitude_estimate": 0.1},
+        confidence=0.5, supporting_observations=[],
+        estimated_cost={"human_hours": 0, "gpu_hours": 0}, risks=[],
+        success_criteria={"metric": "m", "threshold": 0, "eval_window_ticks": 1},
+    )
+    for bad in (["../escape.diff"], ["/abs/path.diff"], ["a/../../b"], [""]):
+        with pytest.raises(ValueError):
+            Proposal.new(**base, artifacts=bad)
+    ok = Proposal.new(**base, artifacts=["architect/diffs/ok.diff"])
+    assert ok.artifacts == ["architect/diffs/ok.diff"]
 
 
 # -------------------------------------------------------------- generators
@@ -103,6 +168,21 @@ def test_hyperparameter_detects_kl_pinned_at_free_nats() -> None:
     p = HyperparameterGenerator().generate(ev)
     assert p is not None and p.target == "rssm.free_nats"
     assert "tb:rssm/kl@step=" in p.supporting_observations[0]
+
+
+def test_generated_proposals_carry_provenance_and_class() -> None:
+    ev = make_evidence("ledger", **{"rssm/kl": [1.0] * 15})
+    ev.bundle_hash = "abcd1234abcd1234"
+    knob = HyperparameterGenerator().generate(ev)
+    assert knob is not None
+    assert knob.intervention_class == "config"          # carries a knob
+    assert knob.provenance["generator_id"] == "propose_hyperparameter"
+    assert knob.provenance["evidence_bundle_hash"] == "abcd1234abcd1234"
+
+    ev2 = make_evidence("ledger", **{"rssm/recon": [0.5] * 30})
+    ev2.competence = degraded_report()
+    exp = RetrainingGenerator().generate(ev2)
+    assert exp is not None and exp.intervention_class == "experiment"  # no knob
 
 
 def test_memory_policy_is_ledger_only() -> None:

@@ -6,22 +6,29 @@ executes every approved change by hand. Structural tests
 (`tests/test_proposals_no_execution.py`) ban execution machinery, restrict
 imports, and confine writes to `runs/<id>/proposals/`.
 
-## Schema (`proposals/schema.py`, `schema_version: 1`)
+## Schema (`proposals/schema.py`, `schema_version: 2`)
 
 | field | meaning |
 |-------|---------|
 | `id`, `type`, `created_tick`, `run_id` | identity; `type` from the 10-entry enum |
-| `source` | `ledger` \| `logs_only` — the control condition; BLINDED everywhere until `status=evaluated` |
-| `rationale` | templated text citing specific log records |
+| `source` | OPEN string (v2), validated non-empty — the ledger-vs-logs control condition (`ledger`/`logs_only`) plus stage-D `architect`; BLINDED everywhere until `status=evaluated`. Blinding keys off status, never off a known-source list |
+| `intervention_class` | `config` \| `experiment` \| `architecture` (v2): what KIND of change. Knob proposals are `config` (tier-0 auto-A/B eligible); everything else `experiment`; the Architect emits `architecture` |
+| `provenance` | `{evidence_bundle_hash, generator_id}` for rule generators, `+ {prompt_hash, model_id}` for LLM-drafted ones — reproducibility (standing rule) |
+| `artifacts` | run-relative paths to attached data files (e.g. an UNAPPLIED diff); never absolute, never containing `..` |
+| `rationale` | templated text citing specific records (`tb:<tag>@step=`, `competence:…`, or `code:<path>@<sha>#Lx-Ly`) |
 | `expected_benefit` | `{metric, direction, magnitude_estimate}` |
 | `confidence` | [0,1]; heuristic at first, recalibrated from binned hit rates once ≥20 evaluated |
-| `supporting_observations` | log-record refs (`tb:<tag>@step=`, `competence:report-<tick>:region-…`) — validated against real records in the acceptance |
+| `supporting_observations` | log/code-record refs — validated against real records in the acceptance |
 | `estimated_cost` | `{human_hours, gpu_hours}` |
 | `risks`, `success_criteria` | criteria: `{metric, threshold, eval_window_ticks}` — the proposal is judged against its OWN criteria |
 | `status` | pending → (approve/reject/postpone/partial/modify) → approved/… → evaluated; legal transitions enforced (`tests/test_review_state_machine.py`) |
 | `decision` | timestamp, note, optional 1–5 usefulness rating, human diff for modifications |
 | `proposed_change` | optional machine-readable knob `{config_path, new_value}` — enables A/B evaluation; absent for non-knob proposals |
 | `linked_experiment_id`, `realized_benefit` | filled by the evaluation run |
+
+`Proposal.from_json` reads v1 records and migrates them (fills `provenance`/
+`artifacts` empty, infers `intervention_class` = `config` if a
+`proposed_change` knob is present else `experiment`).
 
 ## Generators (`proposals/generator.py`) — trigger conditions
 
