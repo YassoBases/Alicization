@@ -1,0 +1,2 @@
+inherit: C:/Users/yasse/Desktop/_Organized/01_Projects/Alicization/configs/smoke.yaml
+agent: {core: rssm}

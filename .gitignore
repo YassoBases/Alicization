@@ -6,3 +6,6 @@ checkpoints/
 *.pt
 *.egg-info/
 .venv/
+
+# battery run artifacts: keep reports/CSVs/figures, not checkpoints/TB
+experiments/results/*/*/*/
