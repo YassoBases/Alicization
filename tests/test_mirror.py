@@ -174,3 +174,14 @@ def test_mpc_returns_valid_actions() -> None:
         actions = mirror._mpc_plan(core, body, torch.randn(4, 20))
     assert actions.shape == (4,)
     assert all(0 <= int(a) < NUM_ACTIONS for a in actions)
+
+
+def test_warmup_disarms_responses_then_arms() -> None:
+    """Responses stay disarmed for warmup_ticks step_state calls (divergence
+    is still recorded by the caller); the first post-warmup crossing arms."""
+    mirror = MirrorMonitor(dict(MIRROR_CFG, warmup_ticks=5), num_envs=1, world_size=32)
+    for _ in range(5):
+        mirror.step_state(np.array([100.0]))
+        assert mirror.state[0] == NORMAL and mirror.trigger_count == 0
+    mirror.step_state(np.array([100.0]))  # first armed tick
+    assert mirror.state[0] == PROBING and mirror.trigger_count == 1

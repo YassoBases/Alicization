@@ -358,8 +358,11 @@ def run_kidnapped(config_path: str, out: Path, seeds: int, sc: dict) -> list[dic
         for name, enabled in (("mirror", True), ("ablation", False)):
             cfg = _cfg(config_path, **{
                 "seed": seed, "agent.core": "rssm",
+                # warmup: responses arm only after training, so both
+                # conditions train identically (see scripts/verify_mirror.py).
                 "mirror": {"enabled": enabled, "threshold": 3.0, "mpc_ticks": 4,
-                           "mpc_horizon": 6, "mpc_candidates": 32},
+                           "mpc_horizon": 6, "mpc_candidates": 32,
+                           "warmup_ticks": sc["train_ticks"] // 4},
                 "ppo.episode_length": 100_000,
                 "ppo.total_steps": sc["train_ticks"],
                 "rssm.sleep_grad_steps": sc["sleep_grad_steps"],

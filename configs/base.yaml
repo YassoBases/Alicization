@@ -141,6 +141,8 @@ mirror:                       # additive (stage-6a): self-state divergence monit
   enabled: false               # gates responses only; divergence is ALWAYS
                                # logged under rssm (monitored, never minimized)
   threshold: 3.0               # cells; crossing triggers probe + MPC
+  warmup_ticks: 20000          # responses disarmed until the pose head has a
+                               # trained baseline (calibrate, then arm)
   mpc_ticks: 4
   mpc_horizon: 6
   mpc_candidates: 64

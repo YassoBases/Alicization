@@ -1,0 +1,47 @@
+{
+  "seed": 0,
+  "steps": 24576,
+  "mirror": {
+    "run_dir": "runs_6a\\20260708-094557",
+    "baseline_mean": 1.403598671850146,
+    "baseline_q99": 4.953239799398314,
+    "spike_level": 4.953239799398314,
+    "spike_ticks": [
+      1,
+      1,
+      1,
+      1
+    ],
+    "relocalization_ticks": [
+      null,
+      51,
+      3,
+      1
+    ],
+    "trigger_count": 117
+  },
+  "ablation": {
+    "run_dir": "runs_6a\\20260708-095727",
+    "baseline_mean": 1.2631431475112742,
+    "baseline_q99": 4.1552254184097706,
+    "spike_level": 4.1552254184097706,
+    "spike_ticks": [
+      0,
+      1,
+      1,
+      1
+    ],
+    "relocalization_ticks": [
+      null,
+      38,
+      64,
+      1
+    ],
+    "trigger_count": 0
+  },
+  "spike_within_20_ticks": true,
+  "mean_relocalization": {
+    "mirror": 18.333333333333332,
+    "ablation": 34.333333333333336
+  }
+}

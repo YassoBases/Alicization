@@ -58,6 +58,13 @@ class MirrorMonitor:
         """``cfg`` is the ``mirror`` config section."""
         self.enabled: bool = cfg.get("enabled", False)
         self.threshold: float = cfg.get("threshold", 3.0)
+        # Responses stay disarmed for the first warmup_ticks step_state calls:
+        # early-training divergence is dominated by the untrained pose head,
+        # and probing/MPC on that noise corrupts the very training that would
+        # bring it down (measured: >1k spurious triggers per smoke run when
+        # armed from tick 0). Calibrate first, then arm.
+        self.warmup_ticks: int = cfg.get("warmup_ticks", 0)
+        self._ticks_seen = 0
         self.mpc_ticks: int = cfg.get("mpc_ticks", 4)
         self.mpc_horizon: int = cfg.get("mpc_horizon", 6)
         self.mpc_candidates: int = cfg.get("mpc_candidates", 64)
@@ -114,7 +121,8 @@ class MirrorMonitor:
         from the NEXT tick (``override_actions``).
         """
         self.just_finished_probing[:] = False
-        if not self.enabled:
+        self._ticks_seen += 1
+        if not self.enabled or self._ticks_seen <= self.warmup_ticks:
             return
         for i in range(self.num_envs):
             if self.state[i] == NORMAL:
@@ -232,6 +240,7 @@ class MirrorMonitor:
         return {
             "state": self.state.copy(), "phase_step": self._phase_step.copy(),
             "trigger_count": self.trigger_count,
+            "ticks_seen": self._ticks_seen,
             "rng_state": self.rng.bit_generator.state,
         }
 
@@ -239,4 +248,5 @@ class MirrorMonitor:
         self.state = state["state"].copy()
         self._phase_step = state["phase_step"].copy()
         self.trigger_count = state["trigger_count"]
+        self._ticks_seen = state.get("ticks_seen", 0)
         self.rng.bit_generator.state = state["rng_state"]

@@ -45,6 +45,12 @@ def run_condition(
     cfg["mirror"] = {
         "enabled": mirror_enabled, "threshold": args.threshold,
         "mpc_ticks": 4, "mpc_horizon": 6, "mpc_candidates": 32,
+        # Arm responses only after training: early-training divergence noise
+        # otherwise triggers >1k spurious probe/MPC interruptions, corrupting
+        # the pose head's own training data and inflating the baseline the
+        # spike criterion is computed from. With warmup, the two conditions
+        # train IDENTICALLY and differ only in armed responses at eval.
+        "warmup_ticks": args.steps // cfg["ppo"]["num_envs"],
     }
     cfg["ppo"]["episode_length"] = 100_000  # no boundary resets mid-measurement
     cfg["ppo"]["total_steps"] = 10**9
