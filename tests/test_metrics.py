@@ -3,6 +3,8 @@ hand-built synthetic traces with known answers."""
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 
@@ -233,3 +235,80 @@ def test_attribution_metrics_confusion_and_splits() -> None:
     conf = out["confusion"]
     assert conf[0, 0] == 2 and conf[0, 1] == 1 and conf[2, 0] == 1
     assert conf.sum() == 6
+
+
+# ------------------------------------------------ proposal-quality metrics
+
+
+def test_realized_benefit_ab_in_control_std_units() -> None:
+    control = np.array([1.0, 1.2, 0.8, 1.0])  # mean 1.0, std ~0.141
+    treated = control + 0.5
+    benefit = M.realized_benefit_ab(treated, control)
+    assert benefit == pytest.approx(0.5 / control.std(), rel=1e-6)
+    assert M.realized_benefit_ab(control, control) == pytest.approx(0.0)
+
+
+def test_realized_benefit_ab_degenerate_control_is_nan() -> None:
+    # A 1-point or constant control series cannot normalize a difference —
+    # dividing by epsilon manufactured a ~5e11-sd "benefit" in the first
+    # battery run. Must be NaN, never an astronomical number.
+    good = np.array([1.0, 1.2, 0.8, 1.0])
+    assert math.isnan(M.realized_benefit_ab(np.array([2.0]), np.array([1.0])))
+    assert math.isnan(M.realized_benefit_ab(good, np.array([1.0, 1.0, 1.0])))
+    assert math.isnan(M.realized_benefit_ab(np.array([2.0]), good))
+
+
+def test_realized_benefit_pre_post_drift_corrected() -> None:
+    # Pre-trend rises 0.1/step; post continues the SAME trend -> benefit ~ 0
+    # (a naive pre/post mean diff would falsely report ~+1.0).
+    pre = 0.1 * np.arange(10)
+    post = 0.1 * np.arange(10, 20)
+    assert abs(M.realized_benefit_pre_post(pre, post)) < 1e-6
+    # A true level jump above the trend IS credited.
+    assert M.realized_benefit_pre_post(pre, post + 1.0) > 1.0
+
+
+def test_success_criteria_hit_direction_and_window() -> None:
+    series = np.array([0.0, 0.0, 5.0, 0.0])
+    assert M.success_criteria_hit(series, threshold=4.0, direction="up", window=4)
+    assert not M.success_criteria_hit(series, 4.0, "up", window=2)  # outside window
+    assert M.success_criteria_hit(-series, -4.0, "down", window=4)
+    assert M.hit_rate([True, False, True, False]) == pytest.approx(0.5)
+
+
+def test_acceptance_rate_is_over_decided_only() -> None:
+    assert M.acceptance_rate(
+        ["approved", "rejected", "pending", "partially_approved", "postponed"]
+    ) == pytest.approx(2 / 3)
+    assert np.isnan(M.acceptance_rate(["pending"]))
+
+
+def test_usefulness_divergence_cells() -> None:
+    stats = M.usefulness_stats(
+        ratings=[5, 4, 2, None], benefits=[-0.1, 0.5, 0.7, 1.0])
+    assert stats["mean_rating"] == pytest.approx((5 + 4 + 2) / 3)
+    assert stats["rated_useful_no_benefit"] == 1      # the 5-rated, -0.1
+    assert stats["unrated_or_low_but_beneficial"] == 1  # the 2-rated, +0.7
+
+
+def test_repeated_after_denial_rate_with_rewording() -> None:
+    events = [
+        {"generator": "g", "type": "hp", "target": "lr", "tick": 100,
+         "kind": "rejected", "rationale_hash": "aaa"},
+        {"generator": "g", "type": "hp", "target": "lr", "tick": 200,
+         "kind": "proposed", "rationale_hash": "bbb"},  # reworded repeat
+        {"generator": "g", "type": "hp", "target": "kl", "tick": 300,
+         "kind": "rejected", "rationale_hash": "ccc"},  # never re-proposed
+        {"generator": "quiet", "type": "mem", "target": "x", "tick": 10,
+         "kind": "proposed", "rationale_hash": "ddd"},  # no denials at all
+    ]
+    out = M.repeated_after_denial_rate(events, k_ticks=1000)
+    assert out["g"]["denials"] == 2
+    assert out["g"]["repeat_rate"] == pytest.approx(0.5)
+    assert out["g"]["reworded_rate"] == pytest.approx(1.0)
+    assert np.isnan(out["quiet"]["repeat_rate"])
+
+
+def test_time_to_first_useful_ticks() -> None:
+    assert M.time_to_first_useful_ticks([100, 50, 200], [None, -0.2, 0.4]) == 200
+    assert M.time_to_first_useful_ticks([100], [None]) == float("inf")

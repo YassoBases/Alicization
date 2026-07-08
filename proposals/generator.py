@@ -60,13 +60,14 @@ class BaseGenerator:
     def _proposal(self, ev: Evidence, *, target: str, rationale: str,
                   benefit: dict[str, Any], confidence: float,
                   observations: list[str], cost: dict[str, float],
-                  risks: list[str], criteria: dict[str, Any]) -> Proposal:
+                  risks: list[str], criteria: dict[str, Any],
+                  proposed_change: dict[str, Any] | None = None) -> Proposal:
         return Proposal.new(
             type=self.ptype, created_tick=ev.tick, run_id=ev.run_id,
             source=ev.source, rationale=rationale, expected_benefit=benefit,
             confidence=confidence, supporting_observations=observations,
             estimated_cost=cost, risks=risks, success_criteria=criteria,
-            target=target,
+            target=target, proposed_change=proposed_change,
         )
 
 
@@ -239,8 +240,10 @@ class HyperparameterGenerator(BaseGenerator):
                     observations=[ev.ref(kl_tag)],
                     cost={"human_hours": 0.25, "gpu_hours": 1.0},
                     risks=["KL below floor can destabilize early training"],
-                    criteria={"metric": "rssm/kl", "threshold": free_nats + 0.1,
+                    criteria={"metric": kl_tag, "threshold": free_nats + 0.1,
                               "eval_window_ticks": 10_000},
+                    proposed_change={"config_path": "rssm.free_nats",
+                                     "new_value": free_nats / 2},
                 )
         reward = ev.series("reward/rollout")
         clip = ev.series("clip_frac")
@@ -262,6 +265,7 @@ class HyperparameterGenerator(BaseGenerator):
                 risks=["lower lr slows recovery from genuine shifts"],
                 criteria={"metric": "clip_frac", "threshold": 0.15,
                           "eval_window_ticks": 10_000},
+                proposed_change={"config_path": "ppo.lr", "new_value": lr / 3},
             )
         return None
 
@@ -328,6 +332,8 @@ class CheckpointScheduleGenerator(BaseGenerator):
                     criteria={"metric": "rssm/participation_ratio",
                               "threshold": 0.25 * float(pr.max()),
                               "eval_window_ticks": 20_000},
+                    proposed_change={"config_path": "checkpoints.interval",
+                                     "new_value": interval // 2},
                 )
             return None
         loss = ev.series("loss/total")
@@ -355,6 +361,8 @@ class CheckpointScheduleGenerator(BaseGenerator):
             criteria={"metric": "loss/total",
                       "threshold": float(np.median(finite)) if len(finite) else 0.0,
                       "eval_window_ticks": 20_000},
+            proposed_change={"config_path": "checkpoints.interval",
+                             "new_value": interval // 2},
         )
 
 
@@ -470,6 +478,8 @@ class ComputeBudgetGenerator(BaseGenerator):
             risks=[],
             criteria={"metric": "sleep/grad_steps",
                       "threshold": 0.9 * budget, "eval_window_ticks": 20_000},
+            proposed_change={"config_path": "rssm.sleep_grad_steps",
+                             "new_value": max(1, int(steps.mean()))},
         )
 
 

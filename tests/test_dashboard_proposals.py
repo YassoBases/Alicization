@@ -48,11 +48,8 @@ def runs_root(tmp_path: Path) -> Path:
     save_proposal(_proposal("run-a", tick=50, target="pending-one"), run)
 
     hit = _proposal("run-a", tick=200, confidence=0.9, target="hit-one")
-    hit.status = "evaluated"
-    hit.realized_benefit = {"metric": "reward/rollout", "observed": 1.0,
-                            "threshold": 0.0, "direction": "up",
-                            "met_success_criteria": True}
-    save_proposal(hit, run)
+    save_proposal(hit, run)  # approved below, THEN marked evaluated —
+    # approve-after-evaluated is an illegal transition (review state machine)
 
     miss = _proposal("run-a", tick=300, confidence=0.9, target="miss-one")
     miss.status = "evaluated"
@@ -66,6 +63,11 @@ def runs_root(tmp_path: Path) -> Path:
     queue = ReviewQueue(run)
     queue.decide(denied.id, "reject", note="not now")
     queue.decide(hit.id, "approve", note="ok")
+    hit.status = "evaluated"  # the runner's transition after the A/B
+    hit.realized_benefit = {"metric": "reward/rollout", "observed": 1.0,
+                            "threshold": 0.0, "direction": "up",
+                            "met_success_criteria": True}
+    save_proposal(hit, run)
     # Generator re-recommends the denied target afterwards (suppressed dup).
     gd = run / "proposals" / "generator_decisions.jsonl"
     with open(gd, "a", encoding="utf-8") as f:

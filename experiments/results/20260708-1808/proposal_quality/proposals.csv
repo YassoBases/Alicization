@@ -1,0 +1,12 @@
+id,run,seed_run,source,type,target,created_tick,confidence,status,benefit,hit,evaluation
+prop-03a23ccb9dba,20260708-150800,20260708-150800,ledger,training_schedule,replay-weighting-3-regions,8192,0.5,evaluated,nan,False,not_executed
+prop-09b753edfc77,20260708-150800,20260708-150800,ledger,hyperparameter,rssm.free_nats,8192,0.55,evaluated,55.34405637902069,True,ab
+prop-15d60755482c,20260708-150800,20260708-150800,ledger,retraining,region-2-0,16384,0.6,evaluated,nan,False,not_executed
+prop-7a543efd7fcb,20260708-150800,20260708-150800,ledger,training_schedule,replay-weighting-10-regions,16384,0.5,evaluated,nan,False,not_executed
+prop-b6e4823e4cc4,20260708-150800,20260708-150800,ledger,memory_policy,memory.write-gate-or-decay,16384,0.5,evaluated,nan,False,not_executed
+prop-df638003a842,20260708-151254,20260708-151254,ledger,hyperparameter,rssm.free_nats,8192,0.55,evaluated,99.63847856031119,True,ab
+prop-29a435b28c8f,20260708-151829,20260708-151829,ledger,memory_policy,memory.write-gate-or-decay,8192,0.5,evaluated,nan,False,not_executed
+prop-9e6ed5f9ff57,20260708-151829,20260708-151829,ledger,training_schedule,replay-weighting-15-regions,8192,0.5,evaluated,nan,False,not_executed
+prop-e9e8482f407a,20260708-151829,20260708-151829,ledger,hyperparameter,rssm.free_nats,8192,0.55,evaluated,63.9118957877535,True,ab
+prop-ad5d92c2df3b,20260708-151829,20260708-151829,ledger,training_schedule,replay-weighting-8-regions,16384,0.5,evaluated,nan,False,not_executed
+prop-1adf5b849e81,20260708-151829,20260708-151829,ledger,training_schedule,replay-weighting-4-regions,24576,0.5,evaluated,nan,False,not_executed

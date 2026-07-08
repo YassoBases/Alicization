@@ -38,6 +38,14 @@ _DECISION_STATUS = {
     "partial": "partially_approved",
 }
 
+# Legal state machine: a human may decide only records that are still open.
+# approved/partially_approved advance to evaluated ONLY via the runner
+# (--ticket); rejected and evaluated are terminal for decisions (rejected
+# targets may be RE-PROPOSED by generators — that path is measured by the
+# repeated-after-denial statistic, not smuggled through re-decisions).
+_DECIDABLE_STATUSES = ("pending", "postponed", "modified")
+_MODIFIABLE_STATUSES = ("pending", "postponed")
+
 
 def blind_view(p: Proposal) -> dict[str, Any]:
     """Public rendering: source hidden until evaluated."""
@@ -83,6 +91,11 @@ class ReviewQueue:
         if action not in _DECISION_STATUS:
             raise ValueError(f"unknown action {action!r}")
         p = self.get(proposal_id)
+        if p.status not in _DECIDABLE_STATUSES:
+            raise ValueError(
+                f"illegal transition: cannot {action} a proposal in status "
+                f"{p.status!r} (decidable: {_DECIDABLE_STATUSES})"
+            )
         p.status = _DECISION_STATUS[action]
         p.decision = {**p.decision, "timestamp": time.time(), "note": note}
         save_proposal(p, self.run_dir)
@@ -116,6 +129,11 @@ class ReviewQueue:
         """Step 1: copy the record for the human to edit (no editor spawn —
         this package never executes anything)."""
         p = self.get(proposal_id)
+        if p.status not in _MODIFIABLE_STATUSES:
+            raise ValueError(
+                f"illegal transition: cannot modify a proposal in status "
+                f"{p.status!r} (modifiable: {_MODIFIABLE_STATUSES})"
+            )
         path = self.edit_path(proposal_id)
         path.write_text(p.to_json(), encoding="utf-8")
         return path

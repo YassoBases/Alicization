@@ -52,6 +52,11 @@ class Proposal:
     linked_experiment_id: str | None = None
     realized_benefit: dict[str, Any] | None = None  # filled after evaluation
     target: str = ""                 # dedup key component (e.g. region/knob)
+    # Machine-readable form of the recommendation WHEN it is a config knob:
+    # {"config_path": "rssm.free_nats", "new_value": 0.5}. None for proposals
+    # with no single-knob form (retraining, logging changes, ...). Enables
+    # A/B realized-benefit evaluation (Section 17); the human still executes.
+    proposed_change: dict[str, Any] | None = None
 
     # ------------------------------------------------------------ lifecycle
 

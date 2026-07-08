@@ -439,6 +439,145 @@ def nmse(forecast_k: np.ndarray, actual_future: np.ndarray, current: np.ndarray)
 # ----------------------------------------------------------- attribution
 
 
+# ===========================================================================
+# Proposal-quality metrics (Section 17). Realized benefit is the PRIMARY
+# metric; acceptance rate is explicitly weak (it measures reviewer behavior
+# as much as proposal quality) and must never headline alone.
+# ===========================================================================
+
+
+def realized_benefit_ab(
+    m_treated: np.ndarray, m_control: np.ndarray
+) -> float:
+    """Preferred form: A/B against a seeded control run.
+
+    benefit = (mean(M_treated[W]) - mean(M_control[W])) / std(M_control[W]).
+    Positive = the change helped, in control-std units.
+
+    Degenerate control (fewer than 2 points, or ~zero variance) makes the
+    normalization meaningless — a 1-point series would report the raw
+    difference over epsilon as an astronomical "benefit". NaN instead; the
+    caller must collect a longer control series.
+    """
+    treated = np.asarray(m_treated, dtype=float)
+    control = np.asarray(m_control, dtype=float)
+    if len(control) < 2 or len(treated) < 2:
+        return float("nan")
+    sd = float(control.std())
+    if sd < 1e-8:
+        return float("nan")
+    return float((treated.mean() - control.mean()) / sd)
+
+
+def realized_benefit_pre_post(
+    m_pre: np.ndarray, m_post: np.ndarray
+) -> float:
+    """Fallback when A/B is infeasible (e.g. logging changes): post-window
+    mean minus the PRE-TREND EXTRAPOLATION (drift correction), normalized by
+    the pre std. Records using this must be marked evaluation=pre_post.
+    """
+    pre = np.asarray(m_pre, dtype=float)
+    post = np.asarray(m_post, dtype=float)
+    if len(pre) < 3:
+        return float("nan")
+    xs = np.arange(len(pre), dtype=float)
+    slope, intercept = np.polyfit(xs, pre, 1)
+    xs_post = np.arange(len(pre), len(pre) + len(post), dtype=float)
+    extrapolated = slope * xs_post + intercept
+    return float((post.mean() - extrapolated.mean()) / (pre.std() + 1e-12))
+
+
+def success_criteria_hit(
+    series: np.ndarray, threshold: float, direction: str, window: int
+) -> bool:
+    """Did M cross the proposal's OWN threshold within its OWN window."""
+    values = np.asarray(series, dtype=float)[:window]
+    if values.size == 0:
+        return False
+    return bool((values >= threshold).any() if direction == "up"
+                else (values <= threshold).any())
+
+
+def hit_rate(hits: list[bool]) -> float:
+    return float(np.mean([bool(h) for h in hits])) if hits else float("nan")
+
+
+def acceptance_rate(decisions: list[str]) -> float:
+    """approvals / decided. WEAK by construction — reviewer behavior is in
+    the numerator and denominator; report only next to realized benefit."""
+    decided = [d for d in decisions
+               if d in ("approved", "partially_approved", "rejected")]
+    if not decided:
+        return float("nan")
+    approved = sum(d != "rejected" for d in decided)
+    return approved / len(decided)
+
+
+def usefulness_stats(
+    ratings: list[float | None], benefits: list[float | None]
+) -> dict[str, float]:
+    """Mean 1-5 reviewer rating + the divergence cells: rated-useful-but-no-
+    benefit (and its mirror) are interesting, so they are counted explicitly."""
+    rated = [(r, b) for r, b in zip(ratings, benefits) if r is not None]
+    if not rated:
+        return {"mean_rating": float("nan"), "rated_useful_no_benefit": 0,
+                "unrated_or_low_but_beneficial": 0}
+    mean_rating = float(np.mean([r for r, _ in rated]))
+    useful_no_benefit = sum(
+        1 for r, b in rated if r >= 4 and (b is None or b <= 0))
+    low_but_beneficial = sum(
+        1 for r, b in rated if r <= 2 and b is not None and b > 0)
+    return {"mean_rating": mean_rating,
+            "rated_useful_no_benefit": useful_no_benefit,
+            "unrated_or_low_but_beneficial": low_but_beneficial}
+
+
+def repeated_after_denial_rate(
+    events: list[dict], k_ticks: int = 50_000
+) -> dict[str, dict[str, float]]:
+    """Per generator: fraction of REJECTED (type, target) pairs re-proposed
+    within ``k_ticks``, and whether the rationale changed (template+evidence
+    hash). ``events``: [{generator, type, target, tick, kind:
+    proposed|rejected, rationale_hash}] in tick order. Descriptive only.
+    """
+    out: dict[str, dict[str, float]] = {}
+    by_gen: dict[str, list[dict]] = {}
+    for ev in events:
+        by_gen.setdefault(ev["generator"], []).append(ev)
+    for gen, evs in by_gen.items():
+        rejected = [e for e in evs if e["kind"] == "rejected"]
+        if not rejected:
+            out[gen] = {"denials": 0, "repeat_rate": float("nan"),
+                        "reworded_rate": float("nan")}
+            continue
+        repeats = reworded = 0
+        for rej in rejected:
+            later = [e for e in evs if e["kind"] == "proposed"
+                     and e["type"] == rej["type"] and e["target"] == rej["target"]
+                     and rej["tick"] < e["tick"] <= rej["tick"] + k_ticks]
+            if later:
+                repeats += 1
+                if any(e["rationale_hash"] != rej["rationale_hash"] for e in later):
+                    reworded += 1
+        out[gen] = {"denials": len(rejected),
+                    "repeat_rate": repeats / len(rejected),
+                    "reworded_rate": (reworded / repeats) if repeats else 0.0}
+    return out
+
+
+def time_to_first_useful_ticks(
+    created_ticks: list[int], benefits: list[float | None]
+) -> float:
+    """Ticks until the first proposal with POSITIVE realized benefit. inf if
+    none yet."""
+    useful = [t for t, b in zip(created_ticks, benefits)
+              if b is not None and b > 0]
+    return float(min(useful)) if useful else float("inf")
+
+
+# ----------------------------------------------------------- attribution
+
+
 def attribution_metrics(
     predicted: np.ndarray, ground_truth: np.ndarray, num_classes: int = 3
 ) -> dict[str, object]:
