@@ -51,6 +51,13 @@ after reading the outputs (deliberately not auto-generated).
 | sleep_ablation | wake+sleep vs wake-only | final reward (last 20%) |
 | reset_battery | signaled vs unsignaled resets | anticipation JS vs label-shuffled null — EXPECTED ~0; exceeding the null q95 is a stop-and-investigate flag |
 
+The kidnapped test runs with the stage-6a acceptance calibration
+(`kidnapped_sleep_grad_steps: 150`, `kidnapped_pose_scale: 5.0` in SCALES,
+warmup armed at training end) — the battery previously omitted it and the
+spike criterion was uncrossable (results/20260708-1311/ANALYSIS.md). Its
+per-run CSV logs `baseline_q99`, `spike_level`, `teleport_peak_20` and
+their ratio so a missed spike is diagnosable from the CSV alone.
+
 ## Stage acceptance scripts (`scripts/verify_*.py`)
 
 Single-capability acceptance runs with reports preserved under

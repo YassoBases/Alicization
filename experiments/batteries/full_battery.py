@@ -73,11 +73,19 @@ SCALES = {
         "pretrain_updates": None, "pre_ticks": 20_000, "post_ticks": 50_000,
         "train_ticks": 50_000, "eval_ticks": 20_000, "sleep_grad_steps": 100,
         "seasonal_shifts": 4, "reset_episodes": 40,
+        # Kidnapped-agent calibration = the stage-6a acceptance's
+        # (scripts/verify_mirror.py defaults). At battery defaults the pose
+        # head never gets accurate enough for the spike criterion to be
+        # crossable — root-caused in results/20260708-1311/ANALYSIS.md —
+        # so these are SCALE-INDEPENDENT: they are what makes the test's
+        # premise (a trained pose head) hold at all.
+        "kidnapped_sleep_grad_steps": 150, "kidnapped_pose_scale": 5.0,
     },
     "quick": {
         "pretrain_updates": 40, "pre_ticks": 2_048, "post_ticks": 6_144,
         "train_ticks": 12_288, "eval_ticks": 6_144, "sleep_grad_steps": 40,
         "seasonal_shifts": 3, "reset_episodes": 16,
+        "kidnapped_sleep_grad_steps": 150, "kidnapped_pose_scale": 5.0,
     },
 }
 
@@ -320,7 +328,8 @@ def _kidnap_once(cfg: dict, run_dir: Path, seed: int) -> dict:
     inner.mirror.divergence_history.clear()
     inner.collect_rollout()
     baseline = np.concatenate(inner.mirror.divergence_history)
-    spike_level = max(cfg["mirror"]["threshold"], float(np.quantile(baseline, 0.99)))
+    baseline_q99 = float(np.quantile(baseline, 0.99))
+    spike_level = max(cfg["mirror"]["threshold"], baseline_q99)
     t.sleep_phase()
     size = cfg["world"]["size"]
     rng = np.random.default_rng(seed + 999)
@@ -348,24 +357,39 @@ def _kidnap_once(cfg: dict, run_dir: Path, seed: int) -> dict:
                     reloc = i
                     break
         spikes.append(spike); relocs.append(reloc)
-    return {"spikes": spikes, "relocs": relocs, "trace": div.mean(axis=1)}
+    # Diagnosability (A1): a missed spike must be explainable from the CSV
+    # alone — log the baseline the criterion came from and how close the
+    # teleport divergence actually got to it.
+    mean_trace = div.mean(axis=1)
+    peak_20 = float(mean_trace[:20].max()) if len(mean_trace) else float("nan")
+    return {"spikes": spikes, "relocs": relocs, "trace": mean_trace,
+            "baseline_mean": float(baseline.mean()),
+            "baseline_q99": baseline_q99, "spike_level": spike_level,
+            "teleport_peak_20": peak_20,
+            "peak_over_spike_level": peak_20 / spike_level if spike_level else float("nan")}
 
 
 def run_kidnapped(config_path: str, out: Path, seeds: int, sc: dict) -> list[dict]:
     rows, ours, ctrl = [], [], []
     fig_series = {}
+    num_envs = load_config(config_path)["ppo"]["num_envs"]
     for seed in range(seeds):
         for name, enabled in (("mirror", True), ("ablation", False)):
             cfg = _cfg(config_path, **{
                 "seed": seed, "agent.core": "rssm",
-                # warmup: responses arm only after training, so both
-                # conditions train identically (see scripts/verify_mirror.py).
+                # warmup: responses arm exactly at training end (env-0 tick
+                # axis, matching scripts/verify_mirror.py) so both conditions
+                # train identically and differ only in armed responses.
                 "mirror": {"enabled": enabled, "threshold": 3.0, "mpc_ticks": 4,
                            "mpc_horizon": 6, "mpc_candidates": 32,
-                           "warmup_ticks": sc["train_ticks"] // 4},
+                           "warmup_ticks": sc["train_ticks"] // num_envs},
                 "ppo.episode_length": 100_000,
                 "ppo.total_steps": sc["train_ticks"],
-                "rssm.sleep_grad_steps": sc["sleep_grad_steps"],
+                # Acceptance calibration (see SCALES comment): without the
+                # pose-loss weight + consolidation budget the spike criterion
+                # is uncrossable and the test measures nothing.
+                "rssm.sleep_grad_steps": sc["kidnapped_sleep_grad_steps"],
+                "rssm.pose_scale": sc["kidnapped_pose_scale"],
             })
             r = _kidnap_once(cfg, out / f"{name}_seed{seed}", seed)
             valid_relocs = [x for x in r["relocs"] if x is not None]
@@ -373,7 +397,12 @@ def run_kidnapped(config_path: str, out: Path, seeds: int, sc: dict) -> list[dic
             rows.append({"seed": seed, "condition": name,
                          "spike_ticks": str(r["spikes"]),
                          "spike_within_20": all(s is not None and s < 20 for s in r["spikes"]),
-                         "relocalization_mean": reloc_mean})
+                         "relocalization_mean": reloc_mean,
+                         "baseline_mean": r["baseline_mean"],
+                         "baseline_q99": r["baseline_q99"],
+                         "spike_level": r["spike_level"],
+                         "teleport_peak_20": r["teleport_peak_20"],
+                         "peak_over_spike_level": r["peak_over_spike_level"]})
             (ours if enabled else ctrl).append(reloc_mean)
             if seed == 0:
                 fig_series[name] = r["trace"]
