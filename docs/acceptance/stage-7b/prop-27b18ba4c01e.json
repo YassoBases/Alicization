@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "id": "prop-27b18ba4c01e",
+  "type": "training_schedule",
+  "created_tick": 16384,
+  "run_id": "20260708-134045",
+  "source": "ledger",
+  "rationale": "13 regions ((0, 0), (0, 1), (0, 2), (0, 3)...) show positive learning progress mid-adaptation \u2014 replay weighting toward them should shorten the adaptation window.",
+  "expected_benefit": {
+    "metric": "competence/regions_mid_adaptation",
+    "direction": "down",
+    "magnitude_estimate": 6.5
+  },
+  "confidence": 0.5,
+  "supporting_observations": [
+    "competence:report-16384:region-(0, 0)",
+    "competence:report-16384:region-(0, 1)",
+    "competence:report-16384:region-(0, 2)",
+    "competence:report-16384:region-(0, 3)"
+  ],
+  "estimated_cost": {
+    "human_hours": 1.0,
+    "gpu_hours": 1.0
+  },
+  "risks": [
+    "overweighting hot regions starves stable ones"
+  ],
+  "success_criteria": {
+    "metric": "competence/regions_mid_adaptation",
+    "threshold": 6.5,
+    "eval_window_ticks": 20000
+  },
+  "status": "pending",
+  "decision": {},
+  "linked_experiment_id": null,
+  "realized_benefit": null,
+  "target": "replay-weighting-13-regions"
+}

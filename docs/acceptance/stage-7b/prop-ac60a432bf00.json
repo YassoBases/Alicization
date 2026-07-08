@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "id": "prop-ac60a432bf00",
+  "type": "retraining",
+  "created_tick": 16384,
+  "run_id": "20260708-134045",
+  "source": "ledger",
+  "rationale": "Competence report @tick 16384: region (3, 3) world-model loss is 3.43x its trailing best (status=degrading) while replay coverage there is 0.017 < 0.02. The model degraded where the replay buffer holds almost no data to recover from.",
+  "expected_benefit": {
+    "metric": "sleep/recon",
+    "direction": "down",
+    "magnitude_estimate": 0.2
+  },
+  "confidence": 0.6,
+  "supporting_observations": [
+    "competence:report-16384:region-(3, 3)",
+    "tb:sleep/recon@step=16384"
+  ],
+  "estimated_cost": {
+    "human_hours": 0.5,
+    "gpu_hours": 2.0
+  },
+  "risks": [
+    "replay reweighting may slow learning elsewhere"
+  ],
+  "success_criteria": {
+    "metric": "sleep/recon",
+    "threshold": -0.1,
+    "eval_window_ticks": 10000
+  },
+  "status": "pending",
+  "decision": {},
+  "linked_experiment_id": null,
+  "realized_benefit": null,
+  "target": "region-3-3"
+}

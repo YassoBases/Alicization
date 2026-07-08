@@ -1,0 +1,10 @@
+  prop-27b18ba4c01e  training_schedule    source=ledger     target=replay-weighting-13-regions
+    refs: ['competence:report-16384:region-(0, 0)', 'competence:report-16384:region-(0, 1)', 'competence:report-16384:region-(0, 2)', 'competence:report-16384:region-(0, 3)']
+  prop-ac60a432bf00  retraining           source=ledger     target=region-3-3
+    refs: ['competence:report-16384:region-(3, 3)', 'tb:sleep/recon@step=16384']
+  prop-e96e21905e70  hyperparameter       source=ledger     target=rssm.free_nats
+    refs: ['tb:sleep/kl@step=16384']
+
+distinct types fired: ['hyperparameter', 'retraining', 'training_schedule']
+sources represented: ['ledger']
+verify_proposals OK
