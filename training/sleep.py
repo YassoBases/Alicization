@@ -311,7 +311,8 @@ class CircadianTrainer:
                     entry["future"][entry["age"]] = intero[i].detach()
                 if entry["age"] >= max_h:
                     self.tuple_store.add(
-                        entry["h"], entry["plan"], entry["intero_now"], entry["future"]
+                        entry["h"], entry["plan"], entry["intero_now"],
+                        entry["future"], pos=entry.get("pos"),
                     )
                 else:
                     still.append(entry)
@@ -337,11 +338,18 @@ class CircadianTrainer:
             self._plan_age[need] = 0
         self._plan_age += 1
 
-        # Open a new pending tuple per env for this tick.
+        # Open a new pending tuple per env for this tick. Capture the world
+        # position (stage-E3) so selfq-mode competence can attribute
+        # forecaster NMSE per region; None when unavailable (heads mode
+        # ignores it).
         for i in range(n):
+            entry_pos = (tuple(inner._last_infos[i]["pos"])
+                         if inner._last_infos is not None and done_prev[i] == 0
+                         else None)
             self._pending[i].append({
                 "h": h_det[i], "plan": int(self._plans[i]),
                 "intero_now": intero[i].detach(), "age": 0, "future": {},
+                "pos": entry_pos,
             })
 
         # Execute the committed plan on the CURRENT observation.
@@ -485,6 +493,12 @@ class CircadianTrainer:
                 metrics[f"sleep/forecaster_nmse_k{k}"] = nmse(
                     out[k][0], batch["intero_now"], batch["future"][k]
                 )
+        # stage-E3: in selfq mode, competence's per-region forecaster NMSE is
+        # aggregated from SelfQ's own query errors (one model -> both metrics).
+        if self._inner.ledger_impl == "selfq" and self._inner.selfq is not None:
+            from selfq.competence import feed_forecast_competence
+
+            feed_forecast_competence(self._inner.competence, batch, self._inner.selfq)
         return metrics
 
     # ----------------------------------------------------------------- sleep

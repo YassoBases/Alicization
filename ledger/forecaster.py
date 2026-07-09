@@ -100,6 +100,10 @@ class ForecastTupleStore:
         self.plan: list[int] = []
         self.intero_now: list[torch.Tensor] = []
         self.intero_future: list[dict[int, torch.Tensor]] = []
+        # Optional world position per tuple (stage-E3): lets selfq-mode
+        # competence attribute forecaster NMSE per region. None in heads mode
+        # -> batch omits it and behavior is unchanged.
+        self.pos: list[tuple[int, int] | None] = []
 
     def __len__(self) -> int:
         return len(self.h)
@@ -110,14 +114,17 @@ class ForecastTupleStore:
         plan: int,
         intero_now: torch.Tensor,
         intero_future: dict[int, torch.Tensor],
+        pos: tuple[int, int] | None = None,
     ) -> None:
         self.h.append(h.detach().cpu())
         self.plan.append(plan)
         self.intero_now.append(intero_now.detach().cpu())
         self.intero_future.append({k: v.detach().cpu() for k, v in intero_future.items()})
+        self.pos.append(pos)
         if len(self.h) > self.capacity:
             self.h.pop(0); self.plan.pop(0)
             self.intero_now.pop(0); self.intero_future.pop(0)
+            self.pos.pop(0)
 
     def batch(
         self, num_plans: int, device: torch.device
@@ -133,4 +140,7 @@ class ForecastTupleStore:
             k: torch.stack([f[k] for f in self.intero_future]).to(device)
             for k in self.horizons
         }
-        return {"h": h, "plan": plan, "intero_now": now, "future": future}
+        out: dict[str, Any] = {"h": h, "plan": plan, "intero_now": now, "future": future}
+        if any(p is not None for p in self.pos):
+            out["pos"] = list(self.pos)
+        return out
