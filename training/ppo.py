@@ -179,10 +179,29 @@ class PPOTrainer:
         self.opt = torch.optim.Adam(self.model.parameters(), lr=self.pcfg["lr"], eps=1e-5)
 
         lcfg = cfg["ledger"]
-        self.body_model = BodyModel(
-            lcfg, core_dim=self.model.core.output_dim, num_actions=NUM_ACTIONS
-        ).to(self.device)
-        self.body_opt = torch.optim.Adam(self.body_model.parameters(), lr=lcfg["lr"])
+        # ledger.impl (stage-E): 'heads' = the separate BodyModel (here) +
+        # Forecaster (sleep.py); 'selfq' = one unified SelfQ constructed HERE
+        # (both intero_dim and num_plans are available) and shared with the
+        # forecaster adapter via CircadianTrainer. Default heads — no swap
+        # unless asked. self.selfq stays None in heads mode.
+        self.selfq = None
+        self.ledger_impl = lcfg.get("impl", "heads")
+        if self.ledger_impl == "selfq":
+            from agent.drives import NUM_PLANS
+            from selfq import SelfQ
+            from selfq.adapters import BodyModelAdapter
+
+            self.selfq = SelfQ(
+                lcfg, core_dim=self.model.core.output_dim, num_actions=NUM_ACTIONS,
+                num_plans=NUM_PLANS, intero_dim=self.vec.intero_dim,
+            ).to(self.device)
+            self.body_model: Any = BodyModelAdapter(self.selfq)
+            self.body_opt = torch.optim.Adam(self.selfq.parameters(), lr=lcfg["lr"])
+        else:
+            self.body_model = BodyModel(
+                lcfg, core_dim=self.model.core.output_dim, num_actions=NUM_ACTIONS
+            ).to(self.device)
+            self.body_opt = torch.optim.Adam(self.body_model.parameters(), lr=lcfg["lr"])
         ema_decay = lcfg.get("log_ema_decay", 0.98)
         self._body_nll_ema = RollingMean(ema_decay)
         self._success_brier_ema = RollingMean(ema_decay)

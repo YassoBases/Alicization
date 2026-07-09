@@ -82,3 +82,64 @@ def test_forecaster_nll_matches_head_nll() -> None:
     target = torch.rand(8, INTERO)
     assert torch.allclose(selfq_forecaster_nll(pred, target),
                           forecaster_nll(pred.intero_mean, pred.intero_logvar, target))
+
+
+# ----------------------------------------------------------- E2 integration
+
+
+def _tiny_circadian(impl: str):  # noqa: ANN202
+    from pathlib import Path
+
+    from training.sleep import CircadianTrainer
+    from world.config import load_config
+
+    cfg = load_config(Path(__file__).resolve().parent.parent / "configs" / "smoke.yaml")
+    cfg["seed"] = 0
+    cfg["device"] = "cpu"
+    cfg["agent"] = {"hidden_size": 16, "gru_layers": 1, "encoder_channels": [4, 8],
+                    "core": "rssm", "controller": "arbiter"}
+    cfg["ppo"].update(rollout_steps=16, seq_len=8, num_envs=2, episode_length=64,
+                      minibatch_transitions=16, epochs=1, total_steps=10**9,
+                      anneal_lr=False)
+    cfg["rssm"].update(sleep_grad_steps=2, sleep_every=64, batch_seqs=4, seq_len=8)
+    cfg["ledger"]["impl"] = impl
+    cfg["run"]["assert_improvement"] = False
+    return CircadianTrainer(cfg, run_dir=None)
+
+
+def test_default_impl_is_heads_no_silent_swap() -> None:
+    from ledger.body_model import BodyModel
+    from ledger.forecaster import Forecaster
+
+    t = _tiny_circadian("heads")
+    assert isinstance(t._inner.body_model, BodyModel)
+    assert isinstance(t.forecaster, Forecaster)
+    assert t._inner.selfq is None
+
+
+def test_selfq_impl_wires_adapters_over_one_model() -> None:
+    from selfq.adapters import BodyModelAdapter, ForecasterAdapter
+
+    t = _tiny_circadian("selfq")
+    assert isinstance(t._inner.body_model, BodyModelAdapter)
+    assert isinstance(t.forecaster, ForecasterAdapter)
+    # Both adapters wrap the SAME SelfQ, trained by ONE shared optimizer.
+    assert t._inner.body_model.selfq is t.forecaster.selfq is t._inner.selfq
+    assert t.fore_opt is t._inner.body_opt
+
+
+def test_selfq_gradient_isolation_through_real_trainer() -> None:
+    """The stage-E hard rule via the real wiring: after a wake body update
+    and a sleep forecaster update, no gradient sits on encoder/core/policy,
+    but SelfQ itself trained."""
+    t = _tiny_circadian("selfq")
+    policy_params = list(t._inner.model.parameters())
+    assert all(p.grad is None for p in policy_params)
+
+    buf = t._inner.collect_rollout()
+    t._inner.update_body_model(buf)  # wake body update -> SelfQ
+
+    assert all(p.grad is None or torch.all(p.grad == 0) for p in policy_params), \
+        "SelfQ body update leaked gradient onto encoder/core/policy"
+    assert any(p.grad is not None and torch.any(p.grad != 0)
+               for p in t._inner.selfq.parameters()), "SelfQ did not train"

@@ -147,12 +147,22 @@ class CircadianTrainer:
         # --- stage-4c: forecaster (own optimizer) + macro-plan arbiter -----
         lcfg = cfg["ledger"]
         core_dim = self.model.core.output_dim
-        self.forecaster = Forecaster(
-            lcfg, core_dim=core_dim, intero_dim=self.vec.intero_dim,
-            num_plans=NUM_PLANS,
-        ).to(self.device)
-        self.fore_opt = torch.optim.Adam(self.forecaster.parameters(), lr=lcfg["lr"])
         self.horizons: tuple[int, ...] = tuple(lcfg["horizons"])
+        # ledger.impl (stage-E): in selfq mode the forecaster is an adapter
+        # over the SAME SelfQ the body model uses (constructed in PPOTrainer),
+        # trained by the SAME optimizer — the sleep forecaster update and the
+        # wake body update alternate over one unified model.
+        if self._inner.ledger_impl == "selfq":
+            from selfq.adapters import ForecasterAdapter
+
+            self.forecaster: Any = ForecasterAdapter(self._inner.selfq, self.horizons)
+            self.fore_opt = self._inner.body_opt
+        else:
+            self.forecaster = Forecaster(
+                lcfg, core_dim=core_dim, intero_dim=self.vec.intero_dim,
+                num_plans=NUM_PLANS,
+            ).to(self.device)
+            self.fore_opt = torch.optim.Adam(self.forecaster.parameters(), lr=lcfg["lr"])
         self.tuple_store = ForecastTupleStore(
             capacity=lcfg.get("forecast_buffer", 20000), horizons=self.horizons
         )

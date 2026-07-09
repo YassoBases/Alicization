@@ -106,6 +106,10 @@ ledger:
   forecaster_hidden: [256, 256] # stage-4c: forecaster, trained in sleep
   horizons: [1, 10]           # add 100 in Stage 6
   lr: 1.0e-3
+  impl: heads                 # stage-E: heads (BodyModel+Forecaster) | selfq
+  #                             (one unified SelfQ). No silent swap.
+  selfq_embed: 64             # SelfQ intent/horizon embedding width
+  selfq_hidden: [128, 128]    # SelfQ trunk (matches body_hidden capacity)
   online_updates: true        # body + reliability heads only
   log_ema_decay: 0.98          # additive: TB rolling-mean smoothing for ledger/* scalars
   forecast_buffer: 20000       # additive: (h, plan, realized-future) tuple store
