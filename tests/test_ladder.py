@@ -16,7 +16,8 @@ from proposals.schema import Proposal, load_all, save_proposal
 
 
 def _knob(run_dir: Path, cfg_path: str, metric: str, *, status: str = "pending",
-          intervention_class: str = "config", knob: bool = True) -> Proposal:
+          intervention_class: str = "config", knob: bool = True,
+          save: bool = True) -> Proposal:
     p = Proposal.new(
         type="hyperparameter", created_tick=1, run_id=run_dir.name,
         source="ledger", rationale="knob", intervention_class=intervention_class,
@@ -31,7 +32,8 @@ def _knob(run_dir: Path, cfg_path: str, metric: str, *, status: str = "pending",
                          if knob else None),
     )
     p.status = status
-    save_proposal(p, run_dir)
+    if save:
+        save_proposal(p, run_dir)
     return p
 
 
@@ -47,11 +49,11 @@ def test_apply_change_dotted_path() -> None:
 
 
 def test_tautology_flag_flags_free_nats_kl_only() -> None:
-    p = _knob(Path("r"), "rssm.free_nats", "rssm/kl")  # not saved (run="r")
+    p = _knob(Path("r"), "rssm.free_nats", "rssm/kl", save=False)
     assert runner.tautology_flag(p) is not None
-    p2 = _knob(Path("r"), "rssm.free_nats", "rssm/recon")
+    p2 = _knob(Path("r"), "rssm.free_nats", "rssm/recon", save=False)
     assert runner.tautology_flag(p2) is None
-    p3 = _knob(Path("r"), "ppo.lr", "rssm/kl")
+    p3 = _knob(Path("r"), "ppo.lr", "rssm/kl", save=False)
     assert runner.tautology_flag(p3) is None
 
 
