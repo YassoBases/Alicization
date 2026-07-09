@@ -194,3 +194,11 @@ researcher:                    # additive (stage-8): post-hoc analysis layer onl
 evaluation_ladder:             # stage-C4 (experiments/runner.py --ladder)
   tier0_eval_ticks: 2048       # short seeded smoke-A/B per config knob;
   #                              tier-1 uses each proposal's own eval_window_ticks
+
+architect:                     # stage-D (python -m architect) — experimenter-side
+  offline: true                # kill switch: true = no network, drafting is a no-op
+  model_id: claude-sonnet-5    # LLM for drafting/critique (recorded in provenance)
+  temperature: 0.2
+  max_tokens: 4096
+  max_source_files: 6          # source-context caps for the prompt
+  max_source_lines: 200
