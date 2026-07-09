@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-import datetime as _dt
+import json
 import sys
 from pathlib import Path
 
@@ -138,20 +138,31 @@ def main() -> int:
     parser.add_argument("--sleep-grad-steps", type=int, default=100,
                         help="full-battery consolidation budget (stage-4c)")
     parser.add_argument("--eval-ticks", type=int, default=6_144)
-    parser.add_argument("--out", default=None)
+    # RESUMABLE: a FIXED default out dir (not dated) + per-point result cache,
+    # so re-running the SAME command after a shutdown skips finished points
+    # and continues. Each point is short (~one training run), so an
+    # interruption costs at most the point in flight.
+    parser.add_argument("--out", default="experiments/results/scale_curves")
     args = parser.parse_args()
 
-    date = _dt.datetime.now().strftime("%Y%m%d-%H%M")
-    out_dir = Path(args.out or f"experiments/results/{date}/scale_curves")
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(args.out)
+    cache = out_dir / "points"
+    cache.mkdir(parents=True, exist_ok=True)
 
     rows: list[dict] = []
     for budget in args.budgets:
         for seed in range(args.seeds):
+            point_file = cache / f"b{budget}_s{seed}.json"
+            if point_file.exists():
+                print(f"=== budget {budget} seed {seed} (cached, skip) ===")
+                rows.append(json.loads(point_file.read_text(encoding="utf-8")))
+                continue
             print(f"=== budget {budget} seed {seed} ===")
             r = run_point(args.config, budget, seed, args.sleep_grad_steps,
                           args.eval_ticks, out_dir / f"runs/b{budget}_s{seed}")
-            rows.append({"budget": budget, "seed": seed, **r})
+            row = {"budget": budget, "seed": seed, **r}
+            point_file.write_text(json.dumps(row), encoding="utf-8")
+            rows.append(row)
             print(f"    acc {r['attribution_acc']:.3f} "
                   f"(always-SELF {r['always_self_baseline']:.3f})  "
                   f"nmse k1 {r['nmse_k1']:.3g} k10 {r['nmse_k10']:.3g}")

@@ -88,12 +88,23 @@ def main() -> int:
     parser.add_argument("--out", default="docs/acceptance/stage-E")
     args = parser.parse_args()
 
+    # RESUMABLE: cache each (seed, impl) run's metrics; re-running the same
+    # command after a shutdown skips finished runs and continues. Each run is
+    # short (one training), so an interruption loses at most the run in flight.
+    cache = Path(args.out) / "runs_cache"
+    cache.mkdir(parents=True, exist_ok=True)
     results: dict[str, list[dict[str, float]]] = {"heads": [], "selfq": []}
     for seed in range(args.seeds):
         for impl in ("heads", "selfq"):
+            unit = cache / f"{impl}_s{seed}.json"
+            if unit.exists():
+                print(f"=== seed {seed} impl {impl} (cached, skip) ===")
+                results[impl].append(json.loads(unit.read_text(encoding="utf-8")))
+                continue
             print(f"=== seed {seed} impl {impl} ===")
-            results[impl].append(_train(impl, seed, args.steps, args.config,
-                                        args.run_root))
+            m = _train(impl, seed, args.steps, args.config, args.run_root)
+            unit.write_text(json.dumps(m), encoding="utf-8")
+            results[impl].append(m)
 
     def seed_mean(impl: str, metric: str) -> float:
         vals = [r[metric] for r in results[impl] if np.isfinite(r[metric])]

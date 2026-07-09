@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-import datetime as _dt
+import json
 import sys
 from pathlib import Path
 from typing import Any, Callable
@@ -739,24 +739,36 @@ def main() -> int:
     parser.add_argument("--seeds", type=int, default=5)
     parser.add_argument("--scale", choices=list(SCALES), default="full")
     parser.add_argument("--only", nargs="*", choices=list(TESTS), default=None)
+    # RESUMABLE: a FIXED default out dir (per scale) + a per-test result
+    # cache, so re-running the same command after a shutdown skips finished
+    # tests and continues. Each test is a bounded set of runs; an
+    # interruption loses at most the test in flight.
     parser.add_argument("--out", default=None)
     args = parser.parse_args()
 
-    date = _dt.datetime.now().strftime("%Y%m%d-%H%M")
-    out_root = Path(args.out or f"experiments/results/{date}")
+    out_root = Path(args.out or f"experiments/results/full_battery_{args.scale}")
     out_root.mkdir(parents=True, exist_ok=True)
+    cache = out_root / "_done"
+    cache.mkdir(exist_ok=True)
     sc = SCALES[args.scale]
 
     summary_rows: list[dict[str, Any]] = []
     for name, fn in TESTS.items():
         if args.only and name not in args.only:
             continue
-        print(f"=== {name} ===")
         stamp = evidence_stamp(name, sc)
+        done_file = cache / f"{name}.json"
+        if done_file.exists():
+            print(f"=== {name} (cached, skip) ===")
+            summary_rows.extend(json.loads(done_file.read_text(encoding="utf-8")))
+            continue
+        print(f"=== {name} ===")
+        errored = False
         try:
             new_rows = fn(args.config, out_root / name, args.seeds, sc)
         except Exception as exc:  # a broken test must not kill the battery
             print(f"!!! {name} FAILED: {exc!r}")
+            errored = True
             new_rows = [{
                 "test": name, "metric": "ERROR", "ours": float("nan"),
                 "ours_ci95": float("nan"), "control": float("nan"),
@@ -765,6 +777,8 @@ def main() -> int:
             }]
         for r in new_rows:
             r["evidence_stamp"] = stamp  # A2: premise-holds vs machinery-only
+        if not errored:  # only cache successful tests, so failures retry on resume
+            done_file.write_text(json.dumps(new_rows), encoding="utf-8")
         summary_rows.extend(new_rows)
         _write_csv(summary_rows, out_root / "summary.csv")
         write_summary(summary_rows, out_root / "summary.md", args.scale, args.seeds)
