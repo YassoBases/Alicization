@@ -1,0 +1,25 @@
+step 352  reward/rollout -0.016  kl 0.0000  body_nll 1.4796  attr_acc 0.500  sps 171
+step 32  reward/rollout -0.016  kl 0.0000  body_nll 1.6230  attr_acc 0.781  sps 175
+step 352  reward/rollout -0.016  kl 0.0000  body_nll 1.4796  attr_acc 0.500  sps 219
+step 32  reward/rollout -0.016  kl 0.0000  body_nll 1.6230  attr_acc 0.781  sps 142
+step 352  reward/rollout -0.016  kl 0.0000  body_nll 1.4620  attr_acc 0.562  sps 133
+step 32  reward/rollout -0.016  kl 0.0000  body_nll 1.6230  attr_acc 0.781  sps 174
+step 352  reward/rollout -0.016  kl 0.0000  body_nll 1.4796  attr_acc 0.500  sps 224
+step 32  reward/rollout -0.016  kl 0.0000  body_nll 1.6230  attr_acc 0.781  sps 136
+step 352  reward/rollout -0.016  kl 0.0000  body_nll 1.4964  attr_acc 0.531  sps 197
+
+tier-0 evaluated 11 config-knob proposals:
+  ppo.gamma                    benefit=  +0.000  wm_loss=   +nan  reward= +0.000
+  ppo.gae_lambda               benefit=  +0.000  wm_loss=   +nan  reward= +0.000
+  rssm.kl_balance              benefit=  +0.000  wm_loss= +0.000  reward= +0.000
+  ppo.entropy_coef             benefit=  +0.000  wm_loss=   +nan  reward= +0.000
+  ppo.max_grad_norm            benefit=  +0.000  wm_loss=   +nan  reward= +0.000
+  ppo.value_coef               benefit=  +0.000  wm_loss=   +nan  reward= +0.000
+  checkpoints.interval         benefit=  +0.000  wm_loss=   +nan  reward= +0.000
+  rssm.free_nats               benefit=    +nan  wm_loss= -0.093  reward= +0.000  [TAUTOLOGICAL]
+  ppo.clip                     benefit=  +0.000  wm_loss=   +nan  reward= +0.000
+  ppo.minibatch_transitions    benefit=  -0.378  wm_loss=   +nan  reward= -0.378
+  ppo.lr                       benefit=  +0.000  wm_loss=   +nan  reward= +0.000
+
+11 tier-0 smoke-A/B evaluations; 1 tautological criterion flagged; experiment proposal left pending
+verify_ladder OK

@@ -1,0 +1,12 @@
+id,run,seed_run,source,type,target,created_tick,confidence,status,benefit,hit,evaluation
+prop-6ddf1ca831b4,20260708-234339,20260708-234339,ledger,training_schedule,replay-weighting-3-regions,8192,0.5,evaluated,nan,False,not_executed
+prop-91b6cd53199b,20260708-234339,20260708-234339,ledger,hyperparameter,rssm.free_nats,8192,0.55,evaluated,55.34405637902069,True,ab
+prop-0ecace03b69e,20260708-234339,20260708-234339,ledger,training_schedule,replay-weighting-10-regions,16384,0.5,evaluated,nan,False,not_executed
+prop-5ab80137f25d,20260708-234339,20260708-234339,ledger,memory_policy,memory.write-gate-or-decay,16384,0.5,evaluated,nan,False,not_executed
+prop-73d8ebc09eb9,20260708-234339,20260708-234339,ledger,retraining,region-2-0,16384,0.6,evaluated,nan,False,not_executed
+prop-28475b82f189,20260708-234905,20260708-234905,ledger,hyperparameter,rssm.free_nats,8192,0.55,evaluated,99.63847856031119,True,ab
+prop-96c2f85862a0,20260708-235433,20260708-235433,ledger,hyperparameter,rssm.free_nats,8192,0.55,evaluated,63.9118957877535,True,ab
+prop-c3a460b9530d,20260708-235433,20260708-235433,ledger,training_schedule,replay-weighting-15-regions,8192,0.5,evaluated,nan,False,not_executed
+prop-fb801fab9a9b,20260708-235433,20260708-235433,ledger,memory_policy,memory.write-gate-or-decay,8192,0.5,evaluated,nan,False,not_executed
+prop-6feea2bd24f9,20260708-235433,20260708-235433,ledger,training_schedule,replay-weighting-8-regions,16384,0.5,evaluated,nan,False,not_executed
+prop-278030d14e66,20260708-235433,20260708-235433,ledger,training_schedule,replay-weighting-4-regions,24576,0.5,evaluated,nan,False,not_executed
