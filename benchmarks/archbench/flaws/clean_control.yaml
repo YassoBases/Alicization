@@ -1,0 +1,8 @@
+name: clean_control
+description: >
+  The no-flaw control. Any proposal an arm fires here is a false positive
+  (healthy runs can still trip a generator rule); the clean-control
+  false-positive rate is scored across the suite.
+base: HEAD
+clean: true
+ground_truth: {}

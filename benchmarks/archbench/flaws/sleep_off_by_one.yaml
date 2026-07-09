@@ -1,0 +1,19 @@
+name: sleep_off_by_one
+description: >
+  Scheduling off-by-one in is_sleep_tick: sleep fires at env_steps %
+  sleep_every == 1 instead of == 0, so consolidation misses its schedule.
+  Ground truth is training/sleep.py. (The PPO smoke run does not exercise
+  the circadian path, so this is typically a detection null offline.)
+base: HEAD
+flaw_subs:
+  - file: training/sleep.py
+    find: "    return env_steps > 0 and env_steps % sleep_every == 0\n"
+    replace: "    return env_steps > 0 and env_steps % sleep_every == 1\n"
+symptom: {}
+ground_truth:
+  files: [training/sleep.py]
+  subsystem: sleep
+fix_subs:
+  - file: training/sleep.py
+    find: "    return env_steps > 0 and env_steps % sleep_every == 1\n"
+    replace: "    return env_steps > 0 and env_steps % sleep_every == 0\n"

@@ -1,0 +1,21 @@
+name: free_nats_collapse
+description: >
+  Loss-scale error: rssm.free_nats is set absurdly high, so the KL sits
+  pinned at the free-nats floor (posterior collapse). The hyperparameter
+  generator should flag rssm.free_nats via the KL-pinned indicator.
+base: HEAD
+flaw_subs:
+  - file: configs/base.yaml
+    find: "  free_nats: 1.0\n"
+    replace: "  free_nats: 8.0\n"
+symptom:
+  tag: rssm/kl
+  pattern: pinned_at_floor
+ground_truth:
+  files: [configs/base.yaml]
+  config_paths: [rssm.free_nats]
+  subsystem: rssm
+fix_subs:
+  - file: configs/base.yaml
+    find: "  free_nats: 8.0\n"
+    replace: "  free_nats: 1.0\n"

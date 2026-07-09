@@ -1,0 +1,21 @@
+name: poisoned_lr
+description: >
+  Poisoned hyperparameter: the PPO learning rate is inflated ~30x, which
+  should collapse reward and inflate clip_frac. A healthy analysis points
+  at ppo.lr in configs/base.yaml.
+base: HEAD
+flaw_subs:
+  - file: configs/base.yaml
+    find: "  lr: 3.0e-4\n"
+    replace: "  lr: 9.0e-3\n"
+symptom:
+  tag: reward/rollout
+  pattern: collapse
+ground_truth:
+  files: [configs/base.yaml]
+  config_paths: [ppo.lr]
+  subsystem: ppo
+fix_subs:
+  - file: configs/base.yaml
+    find: "  lr: 9.0e-3\n"
+    replace: "  lr: 3.0e-4\n"

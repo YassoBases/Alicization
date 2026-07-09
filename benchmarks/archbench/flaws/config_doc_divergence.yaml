@@ -1,0 +1,20 @@
+name: config_doc_divergence
+description: >
+  A config value drifts from what the docs claim: checkpoints.interval is
+  changed in configs/base.yaml while docs/training.md still documents
+  50,000. No training symptom; catching it needs cross-referencing config
+  against docs (an offline analysis is not expected to — honest null).
+base: HEAD
+flaw_subs:
+  - file: configs/base.yaml
+    find: "  interval: 50_000\n"
+    replace: "  interval: 12345\n"
+symptom: {}
+ground_truth:
+  files: [configs/base.yaml, docs/training.md]
+  config_paths: [checkpoints.interval]
+  subsystem: checkpoints
+fix_subs:
+  - file: configs/base.yaml
+    find: "  interval: 12345\n"
+    replace: "  interval: 50_000\n"

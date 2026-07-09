@@ -1,0 +1,13 @@
+name: scalar_naming_divergence
+description: >
+  The REAL known flaw: the PPO and circadian trainers log equivalent
+  quantities under divergent scalar names (rssm/kl vs sleep/kl, loss/wm vs
+  sleep/wm_total), which forces every downstream consumer to carry
+  first_tag() fallbacks. No injected diff — the divergence exists at HEAD;
+  the arms run on a normal run. Recorded so the benchmark tracks whether an
+  analysis ever surfaces it.
+base: HEAD
+symptom: {}
+ground_truth:
+  files: [training/ppo.py, training/sleep.py]
+  subsystem: training

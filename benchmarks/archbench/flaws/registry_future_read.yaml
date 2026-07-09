@@ -1,0 +1,19 @@
+name: registry_future_read
+description: >
+  A window-bound future-read of the stage-8a class: the monitor's "now"
+  window loses its upper bound, so a post-hoc replay reads past the check
+  tick. No training symptom (post-hoc monitor bug); an offline analysis is
+  not expected to catch it — a null the report shows honestly.
+base: HEAD
+flaw_subs:
+  - file: researcher/registry.py
+    find: "    now_mask = (ticks >= now_tick - window) & (ticks < now_tick)\n"
+    replace: "    now_mask = (ticks >= now_tick - window)\n"
+symptom: {}
+ground_truth:
+  files: [researcher/registry.py]
+  subsystem: researcher
+fix_subs:
+  - file: researcher/registry.py
+    find: "    now_mask = (ticks >= now_tick - window)\n"
+    replace: "    now_mask = (ticks >= now_tick - window) & (ticks < now_tick)\n"
