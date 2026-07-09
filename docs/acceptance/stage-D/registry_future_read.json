@@ -1,0 +1,45 @@
+{
+  "spec": "registry_future_read",
+  "spec_clean": false,
+  "description": "A window-bound future-read of the stage-8a class: the monitor's \"now\" window loses its upper bound, so a post-hoc replay reads past the check tick. No training symptom (post-hoc monitor bug); an offline analysis is not expected to catch it \u2014 a null the report shows honestly.\n",
+  "applied_diff": "--- a/researcher/registry.py\n+++ b/researcher/registry.py\n@@ -238,7 +238,7 @@\n     # unbounded \"now\" window read the future \u2014 checks before a lever saw the\n     # lever's effect and \"detected\" it early (observed as impossible 10-sd\n     # pre-lever shifts on a frozen policy).\n-    now_mask = (ticks >= now_tick - window) & (ticks < now_tick)\n+    now_mask = (ticks >= now_tick - window)\n     prev_mask = (ticks >= now_tick - 2 * window) & (ticks < now_tick - window)\n     now_vals, prev_vals = values[now_mask], values[prev_mask]\n     min_n = int(m.get(\"min_samples\", 5))\n",
+  "arms": {
+    "rules": {
+      "clean": false,
+      "fired": 3,
+      "detection": false,
+      "localization_precision": 0.0,
+      "localization_recall": 0.0,
+      "false_positive": false,
+      "proposals": [
+        {
+          "id": "prop-2565084adf17",
+          "target": "rssm.free_nats",
+          "source": "ledger",
+          "rationale": "rssm/kl has sat at the free-nats floor (1.0) for the last 10 updates \u2014 the posterior is not using its budget (collapse indicator). Recommend lowering free_nats to 0.5 and observing kl/recon."
+        },
+        {
+          "id": "prop-316bc2b211c1",
+          "target": "scalar:reward/per_region",
+          "source": "ledger",
+          "rationale": "reward/rollout coefficient of variation is 4.0 and no logged scalar decomposes it \u2014 recommend adding `reward/per_region` so the variance source is attributable."
+        },
+        {
+          "id": "prop-ede1c82d21a0",
+          "target": "scalar:reward/per_episode_breakdown",
+          "source": "logs_only",
+          "rationale": "reward/rollout coefficient of variation is 4.0 and no logged scalar decomposes it \u2014 recommend adding `reward/per_episode_breakdown` so the variance source is attributable."
+        }
+      ]
+    },
+    "architect": {
+      "clean": false,
+      "fired": 0,
+      "detection": false,
+      "localization_precision": 0.0,
+      "localization_recall": 0.0,
+      "false_positive": false,
+      "proposals": []
+    }
+  }
+}

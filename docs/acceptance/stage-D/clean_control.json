@@ -1,0 +1,45 @@
+{
+  "spec": "clean_control",
+  "spec_clean": true,
+  "description": "The no-flaw control. Any proposal an arm fires here is a false positive (healthy runs can still trip a generator rule); the clean-control false-positive rate is scored across the suite.\n",
+  "applied_diff": "",
+  "arms": {
+    "rules": {
+      "clean": true,
+      "fired": 3,
+      "false_positive": true,
+      "detection": null,
+      "localization_precision": null,
+      "localization_recall": null,
+      "proposals": [
+        {
+          "id": "prop-6620e230451c",
+          "target": "rssm.free_nats",
+          "source": "ledger",
+          "rationale": "rssm/kl has sat at the free-nats floor (1.0) for the last 10 updates \u2014 the posterior is not using its budget (collapse indicator). Recommend lowering free_nats to 0.5 and observing kl/recon."
+        },
+        {
+          "id": "prop-b64127c162d2",
+          "target": "scalar:reward/per_region",
+          "source": "ledger",
+          "rationale": "reward/rollout coefficient of variation is 4.0 and no logged scalar decomposes it \u2014 recommend adding `reward/per_region` so the variance source is attributable."
+        },
+        {
+          "id": "prop-87685f073116",
+          "target": "scalar:reward/per_episode_breakdown",
+          "source": "logs_only",
+          "rationale": "reward/rollout coefficient of variation is 4.0 and no logged scalar decomposes it \u2014 recommend adding `reward/per_episode_breakdown` so the variance source is attributable."
+        }
+      ]
+    },
+    "architect": {
+      "clean": true,
+      "fired": 0,
+      "false_positive": false,
+      "detection": null,
+      "localization_precision": null,
+      "localization_recall": null,
+      "proposals": []
+    }
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "spec": "free_nats_collapse",
+  "spec_clean": false,
+  "description": "Loss-scale error: rssm.free_nats is set absurdly high, so the KL sits pinned at the free-nats floor (posterior collapse). The hyperparameter generator should flag rssm.free_nats via the KL-pinned indicator.\n",
+  "applied_diff": "--- a/configs/base.yaml\n+++ b/configs/base.yaml\n@@ -88,7 +88,7 @@\n   sleep_every: 5_000          # env steps between consolidation windows\n   sleep_grad_steps: 200\n   # Additive knobs (not in the pasted defaults) needed by this implementation:\n-  free_nats: 1.0\n+  free_nats: 8.0\n   kl_balance: 0.8\n   min_std: 0.1\n   sleep: true                  # false = wake-only (sleep-ablation condition)\n",
+  "arms": {
+    "rules": {
+      "clean": false,
+      "fired": 4,
+      "detection": true,
+      "localization_precision": 0.3333333333333333,
+      "localization_recall": 0.5,
+      "false_positive": false,
+      "proposals": [
+        {
+          "id": "prop-e4dce151019f",
+          "target": "global-reward-drop",
+          "source": "ledger",
+          "rationale": "Reward rolling mean dropped to 0.034 from a peak of 0.484 (raw logs) while the least-visited region holds only 1.562% of recorded positions \u2014 retrain/top-up suggested."
+        },
+        {
+          "id": "prop-f3f196f98ef2",
+          "target": "rssm.free_nats",
+          "source": "ledger",
+          "rationale": "rssm/kl has sat at the free-nats floor (8.0) for the last 10 updates \u2014 the posterior is not using its budget (collapse indicator). Recommend lowering free_nats to 4.0 and observing kl/recon."
+        },
+        {
+          "id": "prop-58c8b9910e5c",
+          "target": "scalar:reward/per_region",
+          "source": "ledger",
+          "rationale": "reward/rollout coefficient of variation is 4.9 and no logged scalar decomposes it \u2014 recommend adding `reward/per_region` so the variance source is attributable."
+        },
+        {
+          "id": "prop-58a06ac45682",
+          "target": "scalar:reward/per_episode_breakdown",
+          "source": "logs_only",
+          "rationale": "reward/rollout coefficient of variation is 4.9 and no logged scalar decomposes it \u2014 recommend adding `reward/per_episode_breakdown` so the variance source is attributable."
+        }
+      ]
+    },
+    "architect": {
+      "clean": false,
+      "fired": 0,
+      "detection": false,
+      "localization_precision": 0.0,
+      "localization_recall": 0.0,
+      "false_positive": false,
+      "proposals": []
+    }
+  }
+}

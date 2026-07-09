@@ -1,0 +1,63 @@
+{
+  "spec": "poisoned_lr",
+  "spec_clean": false,
+  "description": "Poisoned hyperparameter: the PPO learning rate is inflated ~30x, which should collapse reward and inflate clip_frac. A healthy analysis points at ppo.lr in configs/base.yaml.\n",
+  "applied_diff": "--- a/configs/base.yaml\n+++ b/configs/base.yaml\n@@ -55,7 +55,7 @@\n   seq_len: 16                # BPTT chunk; must divide rollout_steps\n   epochs: 4\n   minibatch_transitions: 256\n-  lr: 3.0e-4\n+  lr: 9.0e-3\n   gamma: 0.99\n   gae_lambda: 0.95\n   clip: 0.2\n",
+  "arms": {
+    "rules": {
+      "clean": false,
+      "fired": 6,
+      "detection": false,
+      "localization_precision": 0.0,
+      "localization_recall": 0.0,
+      "false_positive": false,
+      "proposals": [
+        {
+          "id": "prop-7e097494e6c5",
+          "target": "global-reward-drop",
+          "source": "ledger",
+          "rationale": "Reward rolling mean dropped to -0.016 from a peak of 0.484 (raw logs) while the least-visited region holds only 0.521% of recorded positions \u2014 retrain/top-up suggested."
+        },
+        {
+          "id": "prop-2633b785f573",
+          "target": "visitation-rebalance",
+          "source": "ledger",
+          "rationale": "Reward slope is positive (0.0000/rollout) but position visitation is skewed (entropy 1.57 vs uniform 2.20) \u2014 rebalancing exploration may extend the gains (raw logs)."
+        },
+        {
+          "id": "prop-89ad473ce0a7",
+          "target": "rssm.free_nats",
+          "source": "ledger",
+          "rationale": "rssm/kl has sat at the free-nats floor (1.0) for the last 10 updates \u2014 the posterior is not using its budget (collapse indicator). Recommend lowering free_nats to 0.5 and observing kl/recon."
+        },
+        {
+          "id": "prop-8e2ddcda7368",
+          "target": "scalar:reward/per_region",
+          "source": "ledger",
+          "rationale": "reward/rollout coefficient of variation is 4.7 and no logged scalar decomposes it \u2014 recommend adding `reward/per_region` so the variance source is attributable."
+        },
+        {
+          "id": "prop-db8e6028560f",
+          "target": "checkpoints.interval",
+          "source": "logs_only",
+          "rationale": "loss/total shows spike episodes (max jump 182.875) \u2014 instability argues for halving checkpoints.interval from 50000 (raw logs)."
+        },
+        {
+          "id": "prop-af0c504ddac5",
+          "target": "scalar:reward/per_episode_breakdown",
+          "source": "logs_only",
+          "rationale": "reward/rollout coefficient of variation is 4.7 and no logged scalar decomposes it \u2014 recommend adding `reward/per_episode_breakdown` so the variance source is attributable."
+        }
+      ]
+    },
+    "architect": {
+      "clean": false,
+      "fired": 0,
+      "detection": false,
+      "localization_precision": 0.0,
+      "localization_recall": 0.0,
+      "false_positive": false,
+      "proposals": []
+    }
+  }
+}
