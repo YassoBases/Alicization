@@ -123,9 +123,15 @@ def test_selfq_impl_wires_adapters_over_one_model() -> None:
     t = _tiny_circadian("selfq")
     assert isinstance(t._inner.body_model, BodyModelAdapter)
     assert isinstance(t.forecaster, ForecasterAdapter)
-    # Both adapters wrap the SAME SelfQ, trained by ONE shared optimizer.
+    # Both adapters wrap the SAME SelfQ (one unified model) ...
     assert t._inner.body_model.selfq is t.forecaster.selfq is t._inner.selfq
-    assert t.fore_opt is t._inner.body_opt
+    # ... but the wake body update and the sleep forecaster update use
+    # SEPARATE optimizers over its params, so their Adam moments stay
+    # task-appropriate (stage-E4 stability fix).
+    assert t.fore_opt is not t._inner.body_opt
+    body_params = {id(p) for g in t._inner.body_opt.param_groups for p in g["params"]}
+    fore_params = {id(p) for g in t.fore_opt.param_groups for p in g["params"]}
+    assert body_params == fore_params  # same params, different optimizer state
 
 
 def test_selfq_gradient_isolation_through_real_trainer() -> None:

@@ -67,16 +67,31 @@ class SelfQ(nn.Module):
         self.plan_embed = nn.Linear(num_plans, embed)
         self.horizon_embed = nn.Embedding(len(self.horizons), embed)
 
-        layers: list[nn.Module] = []
-        prev = core_dim + 2 * embed        # h + intent embed + horizon embed
-        for size in cfg.get("selfq_hidden", [128, 128]):
-            layers += [nn.Linear(prev, size), nn.ReLU()]
-            prev = size
-        self.trunk = nn.Sequential(*layers)
-        self.dpos_head = nn.Linear(prev, N_DPOS_CLASSES)
-        self.success_head = nn.Linear(prev, 1)
-        self.denergy_head = nn.Linear(prev, 1)
-        self.intero_head = nn.Linear(prev, 2 * intero_dim)
+        # SHARED base trunk over [h, intent embed, horizon embed], then a
+        # task-specific BRANCH per head family. The two tasks (wake body vs
+        # sleep forecaster) train at different times through this one model;
+        # a single fully-shared trunk lets the frequent forecaster sleep
+        # updates clobber the body representation (measured: body-CE blew up
+        # 3x with high seed variance). Branches confine the cross-task
+        # interference to the base and give each task private capacity to
+        # absorb its own variance; the trainer also gives the two updates
+        # SEPARATE optimizers so their Adam moments do not pollute each other.
+        def _mlp(prev: int, sizes: list[int]) -> tuple[nn.Sequential, int]:
+            layers: list[nn.Module] = []
+            for size in sizes:
+                layers += [nn.Linear(prev, size), nn.ReLU()]
+                prev = size
+            return nn.Sequential(*layers), prev
+
+        self.base, base_out = _mlp(core_dim + 2 * embed,
+                                   list(cfg.get("selfq_hidden", [128, 128])))
+        branch = list(cfg.get("selfq_branch", [128]))
+        self.body_branch, body_out = _mlp(base_out, branch)
+        self.fcst_branch, fcst_out = _mlp(base_out, branch)
+        self.dpos_head = nn.Linear(body_out, N_DPOS_CLASSES)
+        self.success_head = nn.Linear(body_out, 1)
+        self.denergy_head = nn.Linear(body_out, 1)
+        self.intero_head = nn.Linear(fcst_out, 2 * intero_dim)
 
     def _intent_vec(self, intent_onehot: torch.Tensor, kind: str) -> torch.Tensor:
         if kind == INTENT_ACTION:
@@ -96,14 +111,27 @@ class SelfQ(nn.Module):
         hz_idx = torch.full((b,), self._hz_index[horizon], dtype=torch.long,
                             device=h_detached.device)
         hz = self.horizon_embed(hz_idx)
-        feat = self.trunk(torch.cat([h_detached, intent, hz], dim=-1))
-        mean, logvar = self.intero_head(feat).chunk(2, dim=-1)
+        base = self.base(torch.cat([h_detached, intent, hz], dim=-1))
+        # Only the branch the intent needs is computed; the other head
+        # family's fields are placeholder zeros (the corresponding adapter
+        # never reads them — the body adapter reads dpos/success/denergy, the
+        # forecaster adapter reads intero). This keeps each task's gradient
+        # off the other branch and halves the wake hot-path cost.
+        if kind == INTENT_ACTION:
+            bf = self.body_branch(base)
+            zeros = torch.zeros(b, self.intero_dim, device=h_detached.device)
+            return SelfPrediction(
+                dpos_logits=self.dpos_head(bf),
+                success_logit=self.success_head(bf).squeeze(-1),
+                denergy=self.denergy_head(bf).squeeze(-1),
+                intero_mean=zeros, intero_logvar=zeros, horizon=horizon)
+        ff = self.fcst_branch(base)
+        mean, logvar = self.intero_head(ff).chunk(2, dim=-1)
+        z1 = torch.zeros(b, N_DPOS_CLASSES, device=h_detached.device)
+        z2 = torch.zeros(b, device=h_detached.device)
         return SelfPrediction(
-            dpos_logits=self.dpos_head(feat),
-            success_logit=self.success_head(feat).squeeze(-1),
-            denergy=self.denergy_head(feat).squeeze(-1),
-            intero_mean=mean,
-            intero_logvar=logvar.clamp(_LOGVAR_MIN, _LOGVAR_MAX),
+            dpos_logits=z1, success_logit=z2, denergy=z2,
+            intero_mean=mean, intero_logvar=logvar.clamp(_LOGVAR_MIN, _LOGVAR_MAX),
             horizon=horizon)
 
 

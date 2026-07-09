@@ -36,3 +36,17 @@ NOT here — it is Stage 7's P8.1, no longer deferred.
   docs/safety_scope.md — a human executes every approved change. Blocked
   by: the proposal-layer plumbing itself (queue + review UI), and the
   safety_scope data-not-code rule is a precondition, not an afterthought.
+
+## SelfQ forecaster parity at full scale (stage-E follow-up)
+
+SelfQ passes BODY parity at smoke scale (CE within 7%, Brier 2x better,
+stable across seeds) but its forecaster NMSE is ~1.6x the separate head's
+at k=10 — because the shared base is won by the more-frequent wake body
+updates, starving the sleep-trained forecaster (visible as an inverse
+body<->forecaster correlation across seeds in docs/acceptance/stage-E).
+At smoke scale this is undeterminable anyway (both impls' forecasters are
+NMSE >> identity, below the stage-A minimum viable scale). Follow-ups:
+(1) the full-scale parity run (needs the stage-A full-scale confirmation);
+(2) balance the wake body vs sleep forecaster update budgets on the shared
+base (or enlarge the base) so the forecaster branch is not starved;
+(3) attribution's SelfQ-residual reframing (deferred spec, not code).

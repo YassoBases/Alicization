@@ -109,7 +109,11 @@ ledger:
   impl: heads                 # stage-E: heads (BodyModel+Forecaster) | selfq
   #                             (one unified SelfQ). No silent swap.
   selfq_embed: 64             # SelfQ intent/horizon embedding width
-  selfq_hidden: [128, 128]    # SelfQ trunk (matches body_hidden capacity)
+  selfq_hidden: [256, 256]    # SelfQ SHARED base trunk (carries both heads)
+  selfq_branch: [128]         # per-task branch (body vs forecaster) off the
+  #                             base — confines cross-task interference to the
+  #                             base so the frequent sleep forecaster updates
+  #                             don't clobber the body head (stage-E4).
   online_updates: true        # body + reliability heads only
   log_ema_decay: 0.98          # additive: TB rolling-mean smoothing for ledger/* scalars
   forecast_buffer: 20000       # additive: (h, plan, realized-future) tuple store

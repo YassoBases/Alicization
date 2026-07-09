@@ -156,7 +156,16 @@ class CircadianTrainer:
             from selfq.adapters import ForecasterAdapter
 
             self.forecaster: Any = ForecasterAdapter(self._inner.selfq, self.horizons)
-            self.fore_opt = self._inner.body_opt
+            # SEPARATE optimizer over the SAME SelfQ params (stage-E4): the
+            # sleep forecaster loss and the wake body loss have very
+            # different scales, and one shared Adam let the sleep updates'
+            # moment estimates destabilize the body head (body-CE variance
+            # across seeds). Separate optimizers keep each task's moments
+            # task-appropriate; the forecaster branch's params only get
+            # gradient here, the body branch's only in wake, and the shared
+            # base is updated by both (the intended unification).
+            self.fore_opt = torch.optim.Adam(self._inner.selfq.parameters(),
+                                             lr=lcfg["lr"])
         else:
             self.forecaster = Forecaster(
                 lcfg, core_dim=core_dim, intero_dim=self.vec.intero_dim,
