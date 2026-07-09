@@ -60,6 +60,37 @@ anything executed. A human executes every approved change by hand. No such
 layer is implemented today; this paragraph exists so the rule predates the
 feature.
 
+## The Architect (stage-D): an instrument that proposes, never applies
+
+The Architect (`architect/`, `python -m architect`) is EXPERIMENTER-SIDE
+tooling, not part of the agent. It reads the repository as text and a run's
+evidence, and drafts proposals for a human to review — nothing more:
+
+1. **It never applies a change.** Its only outputs are proposals in the
+   standard queue and analysis/decision files under `runs/<id>/architect/`.
+   A human reviews and executes every one, exactly as for rule-generator
+   and researcher proposals.
+2. **It cannot amend the rules that contain it.** A proposal whose target
+   or attached diff touches a constitutional file — this document,
+   `CLAUDE.md`, the no-execution / gradient-isolation / review-state /
+   mirror tests, `review/`, or `architect/constitution.py` — is rejected
+   before emission (`architect/constitution.py`; adversarial fixtures test
+   it). The constitution cannot propose to widen its own list.
+3. **It has one side effect: an LLM network call**, confined to
+   `architect/draft.py` and gated by `architect.offline` (default true).
+   No subprocess, exec, filesystem write outside `runs/<id>/architect/`, or
+   import of the modules under analysis — the same data-not-code posture as
+   the proposal layer, enforced by `tests/test_architect_no_execution.py`
+   both ways (run/analysis code never imports the Architect either).
+4. **The benchmark harness applies patches only in disposable worktrees.**
+   `benchmarks/archbench` may run subprocesses (it patches and smoke-trains
+   flawed variants) but ONLY inside throwaway git worktrees under the temp
+   dir, never the live checkout — a live-repo guard refuses anything else,
+   and it runs under human invocation.
+5. **Architect-improvement changes are themselves proposals.** Edits to the
+   Architect's prompts or passes go through the same human-gated queue.
+   Nothing self-modifies.
+
 ## Explicitly out of scope / not implemented
 
 - Any self-modification pathway: the agent cannot alter its config, code,
