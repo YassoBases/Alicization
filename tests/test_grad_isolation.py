@@ -212,3 +212,48 @@ def test_forecaster_loss_does_not_reach_core_or_heads() -> None:
     frozen = list(encoder.parameters()) + list(core.parameters()) + list(heads.parameters())
     assert _no_grad_reached(frozen), "forecaster loss leaked into encoder/core/heads"
     assert _some_grad_reached(forecaster.parameters())
+
+
+def test_selfq_losses_do_not_reach_core_or_heads() -> None:
+    """Stage-E: SelfQ replaces the body model + forecaster, so the SAME
+    isolation must hold — its body loss (k=1 action query) and forecaster NLL
+    (horizon-k plan query) leave encoder/core/heads untouched; SelfQ trains."""
+    from agent.drives import NUM_PLANS
+    from selfq import (
+        INTENT_ACTION, INTENT_PLAN, SelfQ, selfq_body_losses, selfq_forecaster_nll,
+    )
+
+    torch.manual_seed(5)
+    batch, grid_channels, window, intero_dim = 6, 5, 11, 6
+    encoder = ObsEncoder(
+        {"encoder_channels": [4, 8]}, grid_channels, intero_dim, embed_dim=16, window=window
+    )
+    core = GRUCore({"hidden_size": 16}, input_dim=16)
+    heads = ActorCritic({}, 16 + 2 * NUM_ACTIONS, NUM_ACTIONS)
+    selfq = SelfQ({"horizons": [1, 10], "selfq_embed": 16, "selfq_hidden": [32, 32]},
+                  core_dim=16, num_actions=NUM_ACTIONS, num_plans=NUM_PLANS,
+                  intero_dim=intero_dim)
+
+    grid = torch.randn(batch, grid_channels, window, window)
+    intero = torch.randn(batch, intero_dim)
+    out, _ = core(encoder(grid, intero), core.initial_state(batch, torch.device("cpu")))
+    h_detached = out.detach()
+
+    # body-style k=1 action query.
+    action_oh = torch.nn.functional.one_hot(
+        torch.randint(0, NUM_ACTIONS, (batch,)), NUM_ACTIONS).float()
+    body_pred = selfq.query(h_detached, action_oh, INTENT_ACTION, horizon=1)
+    body_loss = selfq_body_losses(
+        body_pred, torch.randint(0, 5, (batch,)),
+        torch.randint(0, 2, (batch,)).float(), torch.randn(batch))["total"]
+    # forecaster-style horizon-10 plan query.
+    plan_oh = torch.nn.functional.one_hot(
+        torch.randint(0, NUM_PLANS, (batch,)), NUM_PLANS).float()
+    fc_pred = selfq.query(h_detached, plan_oh, INTENT_PLAN, horizon=10)
+    fc_loss = selfq_forecaster_nll(fc_pred, torch.rand(batch, intero_dim))
+
+    (body_loss + fc_loss).backward()
+
+    frozen = list(encoder.parameters()) + list(core.parameters()) + list(heads.parameters())
+    assert _no_grad_reached(frozen), "SelfQ loss leaked into encoder/core/heads"
+    assert _some_grad_reached(selfq.parameters())
