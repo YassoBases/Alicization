@@ -67,6 +67,7 @@ def run_point(config: str, budget: int, seed: int,
     cfg["world"]["levers"] = {
         "ghost_events": {"rate": 0.02, "kinds": ["push", "consume_food"]}}
     cfg["run"]["assert_improvement"] = False
+    cfg.setdefault("checkpoints", {})["interval"] = 10**12  # measurement run: no ckpt
 
     t = CircadianTrainer(cfg, run_dir=run_dir)
     t.train()

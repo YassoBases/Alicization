@@ -180,6 +180,10 @@ def evidence_stamp(test: str, sc: dict[str, Any]) -> str:
 def _cfg(config_path: str, **overrides: Any) -> dict[str, Any]:
     cfg = load_config(config_path)
     cfg["run"]["assert_improvement"] = False
+    # Battery runs are measurements, not resumable training: disable
+    # checkpoints so a full-scale 5-seed sweep does not fill the disk with
+    # replay-buffer snapshots (~1 GB each). Overridable below.
+    cfg.setdefault("checkpoints", {})["interval"] = 10**12
     for dotted, value in overrides.items():
         node = cfg
         keys = dotted.split(".")

@@ -71,6 +71,9 @@ def _train(impl: str, seed: int, steps: int, config: str, run_root: str) -> dict
     cfg["ppo"]["total_steps"] = steps
     cfg["ppo"]["episode_length"] = 100_000
     cfg["run"]["assert_improvement"] = False
+    # Measurement runs: no resumable checkpoints needed. Disabling them keeps
+    # disk to small TB/JSON (a full-scale replay-buffer checkpoint is ~1 GB).
+    cfg.setdefault("checkpoints", {})["interval"] = 10**12
     run_dir = Path(create_run_dir(run_root))
     CircadianTrainer(cfg, run_dir=run_dir).train()
     return {name: _final_mean(run_dir, tag) for name, tag in METRICS.items()}
