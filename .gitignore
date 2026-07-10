@@ -9,3 +9,6 @@ checkpoints/
 
 # battery run artifacts: keep reports/CSVs/figures, not checkpoints/TB
 experiments/results/*/*/*/
+
+# secrets (stage-Z reads ANTHROPIC_API_KEY from the env only)
+.env

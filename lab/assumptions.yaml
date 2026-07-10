@@ -1,0 +1,495 @@
+# Assumption Registry (Architecture Laboratory, Phase 1)
+#
+# Every major subsystem is a scientific hypothesis, not a permanent design.
+# Each entry records what the component claims, the evidence for and against
+# it (real citations into docs/acceptance and experiments/results), a
+# calibrated confidence, measurable success/failure criteria, replacement
+# candidates by maturity, and a status.
+#
+# status:     supported | contested | unsupported | untested
+# maturity:   established | adaptation | underexplored | speculative
+# citations:  repo-relative path, optionally #Lx or #Lx-Ly. The test
+#             tests/test_assumptions_registry.py asserts every citation resolves.
+#
+# CONSTITUTIONAL NOTE: gradient isolation, the review protocol, the blind
+# invariant, the structural/safety tests, and the human gate are recorded
+# here for completeness but are NOT replaceable scientific hypotheses — their
+# failure_criteria never authorise removal (see architect/constitution.py,
+# docs/safety_scope.md).
+
+schema_version: 1
+
+assumptions:
+
+  # ---------------------------------------------------------------- core
+  - id: recurrent-core
+    component: agent/core_rssm.py, agent/core_gru.py
+    purpose: >
+      A persistent recurrent hidden state h that carries the agent across
+      ticks and is the substrate every self-model head reads.
+    hypothesis: >
+      A learned recurrent state-space model (deter + stoch latent, dynamics
+      ensemble) captures the gridworld's dynamics well enough to (a) drive a
+      competent policy and (b) support self-prediction.
+    evidence_for:
+      - docs/acceptance/stage-4c/forecaster_report.md   # forecaster on top of h beats identity at k=10
+      - docs/acceptance/stage-6a/kidnapped_report.md    # RSSM pose head localises; teleport spike works
+      - docs/architecture.md
+    evidence_against:
+      - experiments/results/20260708-1311/ANALYSIS.md   # world-model surprise proxy is artificially LOW at init (untrained-artifact problem)
+    confidence: 0.7
+    confidence_note: >
+      The core demonstrably supports downstream heads at scale, but no
+      ablation isolates RSSM vs GRU vs a simpler predictor on THIS world.
+    success_criteria: >
+      wm loss decreases and stays down; downstream heads (forecaster, pose)
+      beat their baselines at >=113k steps.
+    failure_criteria: >
+      A strictly simpler core (GRU-only, or a fixed featuriser) matches
+      forecaster NMSE and kidnapped relocalisation within noise at full scale.
+    replacement_candidates:
+      - {name: GRU-only core (already present as agent.core=gru), maturity: established}
+      - {name: deterministic latent (drop the stochastic path), maturity: adaptation}
+      - {name: structured-state-space / linear-attention core, maturity: underexplored}
+    status: supported
+
+  - id: latent-representation
+    component: agent/core_rssm.py (deter+stoch split)
+    purpose: The factorisation of h into a deterministic path and a sampled stochastic latent.
+    hypothesis: >
+      A stochastic latent improves world-model calibration and the
+      ensemble-disagreement epistemic signal versus a purely deterministic state.
+    evidence_for:
+      - docs/architecture.md
+    evidence_against: []
+    confidence: 0.4
+    confidence_note: >
+      Untested in isolation — no run compares stoch-on vs stoch-off on any
+      downstream metric. The epistemic map is used (researcher EIG) but its
+      dependence on the stochastic path is unmeasured.
+    success_criteria: >
+      stoch-on beats stoch-off on forecaster NMSE or on EIG calibration
+      (docs/acceptance/stage-B/researcher_value_cusum.md style measurement).
+    failure_criteria: stoch-off matches within noise -> drop the stochastic path.
+    replacement_candidates:
+      - {name: deterministic-only latent, maturity: adaptation}
+      - {name: discrete/categorical latent (DreamerV3-style), maturity: established}
+    status: untested
+
+  # --------------------------------------------------------------- memory
+  - id: episodic-memory
+    component: memory/episodic.py
+    purpose: A surprise-gated store of past observations with spatial retrieval, fed to the policy as a detached summary.
+    hypothesis: Remembering surprising food/water locations improves foraging over a memoryless agent.
+    evidence_for:
+      - docs/architecture.md
+    evidence_against:
+      - docs/acceptance/stage-5b/reliability_report.md  # in the food-turnover regime, remembered locations are mostly stale on arrival
+    confidence: 0.4
+    confidence_note: >
+      No committed A/B isolates memory-on vs memory-off on reward or
+      stale-trip rate; the reliability sub-experiment suggests the world's
+      ~75-tick food turnover limits what any memory can buy.
+    success_criteria: memory-on beats memory-off on reward or stale-trip rate at full scale.
+    failure_criteria: no reward/stale-trip difference -> memory is dead weight in this regime.
+    replacement_candidates:
+      - {name: no episodic memory (rely on recurrent state), maturity: established}
+      - {name: shorter-horizon / decaying store tuned to food-turnover period, maturity: adaptation}
+    status: contested
+
+  - id: memory-reliability-weighting
+    component: ledger/reliability.py
+    purpose: A learned P(memory still matches world) that reweights retrieval and drives an "inspect" plan.
+    hypothesis: Down-weighting unreliable memories reduces stale trips to dead food locations.
+    evidence_for: []
+    evidence_against:
+      - docs/acceptance/stage-5b/reliability_report.md    # stale-trip rate WITH reliability 87/1k WORSE than ablation 28/1k; decay curves do not differ by region
+      - experiments/results/20260708-1311/ANALYSIS.md     # reconfirmed null at quick scale (29.3 vs 32.1, overlapping CIs)
+    confidence: 0.85
+    confidence_note: >
+      Two independent scales agree the weighting does not help and the fitted
+      curves are flat/indistinguishable; the model is a zero-init logistic
+      regression that barely moves. Confidence is in the NULL.
+    success_criteria: stale-trip rate WITH reliability strictly below the ablation at full scale.
+    failure_criteria: >
+      ALREADY MET (twice). This is the directive's first named removal
+      candidate: it becomes a proposal with predicted effect ~0, reviewed and
+      executed by the human.
+    replacement_candidates:
+      - {name: REMOVE the reliability head + inspect drive, maturity: established}
+      - {name: replace with a fixed age/volatility decay (no learned model), maturity: adaptation}
+    status: unsupported
+
+  # ------------------------------------------------------- consolidation
+  - id: consolidation-imagination
+    component: training/sleep.py (Dreamer-style imagination in sleep)
+    purpose: Sleep-phase actor-critic learning on imagined RSSM rollouts (lambda-returns) plus world-model replay.
+    hypothesis: Imagination-based consolidation accelerates policy improvement over wake-only PPO.
+    evidence_for:
+      - docs/acceptance/stage-4c/forecaster_report.md   # the sleep machinery trains a forecaster that works
+    evidence_against:
+      - experiments/results/20260708-1311/ANALYSIS.md   # sleep-ablation directionally fine but statistically NULL at smoke (overlapping CIs; needs ~100 grad-steps/window)
+    confidence: 0.45
+    confidence_note: >
+      Wake+sleep ends slightly ahead of wake-only but CIs overlap at smoke
+      scale; the benefit is unproven pending the full-scale sleep-ablation.
+    success_criteria: wake+sleep final reward beats wake-only with non-overlapping CI at full scale.
+    failure_criteria: no separation at full scale -> imagination is not earning its compute.
+    replacement_candidates:
+      - {name: wake-only PPO (drop imagination), maturity: established}
+      - {name: replay-only consolidation (no imagined rollouts), maturity: adaptation}
+    status: contested
+
+  - id: wake-sleep-scheduling
+    component: training/sleep.py (is_sleep_tick)
+    purpose: An exogenous, step-counter-only schedule that alternates env interaction and consolidation.
+    hypothesis: A fixed circadian schedule is a sufficient and safe consolidation trigger.
+    evidence_for:
+      - docs/safety_scope.md    # scheduling is a pure function of the step counter (signature-tested) — a safety property
+    evidence_against:
+      - experiments/results/20260708-1311/ANALYSIS.md   # the value of consolidation itself is unproven (see consolidation-imagination)
+    confidence: 0.6
+    confidence_note: >
+      The purity/safety of the schedule is established and tested; whether
+      THIS cadence is optimal is untested (no cadence sweep).
+    success_criteria: safety signature test stays green; consolidation shows value (ties to consolidation-imagination).
+    failure_criteria: a different cadence materially changes outcomes -> the fixed cadence is a hidden hyperparameter.
+    replacement_candidates:
+      - {name: cadence sweep (sleep_every), maturity: adaptation}
+    status: untested
+
+  # ------------------------------------------------------- drives/action
+  - id: drives-intrinsic
+    component: agent/drives.py, training/reward.py
+    purpose: Homeostatic task terms (energy/fatigue setpoints) plus an epistemic-exploration plan.
+    hypothesis: Homeostatic drives + epistemic exploration produce competent, self-maintaining behaviour without an extrinsic score.
+    evidence_for:
+      - docs/architecture.md
+      - experiments/results/20260708-1311/ANALYSIS.md   # reset-anticipation probe needs a policy and the agent has one (behaves)
+    evidence_against: []
+    confidence: 0.5
+    confidence_note: >
+      The agent clearly acts and survives, but no ablation isolates the
+      intrinsic/epistemic terms' contribution to any downstream capability.
+    success_criteria: removing the epistemic drive measurably reduces coverage or adaptation speed.
+    failure_criteria: removing it changes nothing -> the intrinsic term is inert.
+    replacement_candidates:
+      - {name: reward-only (drop intrinsic/epistemic), maturity: established}
+      - {name: count-based or RND-style novelty bonus, maturity: established}
+    status: untested
+
+  - id: planning-arbiter
+    component: agent/drives.py (macro-plan arbiter), ledger/forecaster.py
+    purpose: An epsilon-greedy arbiter selecting macro-plans scored by the forecaster.
+    hypothesis: Forecaster-scored macro-plan selection outperforms the raw reactive actor.
+    evidence_for:
+      - docs/acceptance/stage-4c/forecaster_report.md   # the forecaster the arbiter scores with beats identity
+    evidence_against:
+      - experiments/results/20260708-2141/researcher_value/ANALYSIS.md  # agenda/EIG "value" machinery shows no positive effect at smoke (adjacent evidence that scored-selection value is unproven here)
+    confidence: 0.4
+    confidence_note: >
+      No head-to-head of arbiter-controller vs actor-controller on reward is
+      committed; the forecaster it depends on only works past ~113k.
+    success_criteria: arbiter controller beats actor controller on reward/adaptation at full scale.
+    failure_criteria: actor-only matches -> the arbiter is unnecessary overhead.
+    replacement_candidates:
+      - {name: actor-only controller (already present as agent.controller=actor), maturity: established}
+      - {name: short-horizon MPC through the RSSM prior, maturity: adaptation}
+    status: contested
+
+  # --------------------------------------------------------- Ledger heads
+  - id: ledger-body-model
+    component: ledger/body_model.py
+    purpose: Per-action success / dpos / Delta-energy predictions fed (detached) to the policy.
+    hypothesis: An explicit body model gives the policy useful capability estimates and sharp self-prediction.
+    evidence_for:
+      - docs/acceptance/stage-E/parity.md   # body CE/Brier are functional and stable at smoke scale (SelfQ matches/beats them)
+    evidence_against:
+      - experiments/results/20260708-1311/ANALYSIS.md   # capability-shift battery's use of the body-NLL detector was censored 18/18 at quick scale (undertrained baseline)
+    confidence: 0.65
+    confidence_note: >
+      The head trains and predicts well (Brier ~0.02); whether feeding it to
+      the policy causally helps (architecture A vs B) is not yet decided at scale.
+    success_criteria: architecture A (ledger features on) beats B (withheld) on detection/recovery at full scale.
+    failure_criteria: A == B at full scale -> the body features do not help the policy (keep head for evaluation, drop from policy input).
+    replacement_candidates:
+      - {name: use_ledger_features=false (already the B control), maturity: established}
+      - {name: fold into SelfQ (already available), maturity: adaptation}
+    status: supported
+
+  - id: ledger-attribution
+    component: ledger/attribution.py
+    purpose: A self / world / both classifier over body-model residuals, labelling the cause of each transition.
+    hypothesis: The agent can learn to attribute state changes to itself vs the world.
+    evidence_for:
+      - docs/acceptance/stage-A/scale_curves_fullscale/README.md   # reaches ~0.99 on the seeds where it converges
+    evidence_against:
+      - docs/acceptance/stage-A/scale_curves_fullscale/README.md   # BIMODAL and seed-fragile: 0.99 or 0.00 collapse at every budget incl. 200k; where it works it only MATCHES always-SELF (~0.99), never beats
+      - experiments/results/20260708-1311/ANALYSIS.md              # 0.12 at quick scale (everything-anomalous early regime)
+    confidence: 0.7
+    confidence_note: >
+      Confidence is in the finding that attribution, AS BUILT, does not
+      cleanly earn its keep: unstable training and no margin over the trivial
+      baseline. A stability investigation (loss balance / pseudo-label
+      thresholds) precedes any architecture claim.
+    success_criteria: accuracy beats the always-SELF majority by a stable margin across all seeds.
+    failure_criteria: ALREADY MET (seed-fragile, no margin) -> redesign (SelfQ-residual reframing, TODO.md) or remove from the policy path.
+    replacement_candidates:
+      - {name: SelfQ-residual attribution (deferred spec, TODO.md), maturity: adaptation}
+      - {name: class-balanced / focal loss + threshold calibration, maturity: established}
+      - {name: REMOVE (keep only as an evaluation probe), maturity: established}
+    status: unsupported
+
+  - id: ledger-forecaster
+    component: ledger/forecaster.py
+    purpose: K-step interoceptive forecasts per macro-plan, scored against the identity baseline.
+    hypothesis: The agent can predict its own future interoceptive state better than "nothing changes".
+    evidence_for:
+      - docs/acceptance/stage-4c/forecaster_report.md              # NMSE 0.78 < 1 at k=10, 50k steps
+      - docs/acceptance/stage-A/scale_curves_fullscale/README.md   # crosses NMSE<1 between 63k-113k; ~0.5 at 200k, 3/3 seeds
+    evidence_against:
+      - docs/acceptance/stage-E/parity.md   # k=1 NMSE is denominator-degenerate (identity MSE ~6e-5); non-functional below ~50k
+    confidence: 0.75
+    confidence_note: >
+      Solidly beats identity at k=10 once past ~113k, across seeds — one of
+      the strongest positive results. k=1 is a degenerate metric, not a failure.
+    success_criteria: NMSE(k=10) < 1 across seeds at full scale. MET.
+    failure_criteria: regresses above identity at full scale.
+    replacement_candidates:
+      - {name: fold into SelfQ (contested via ledger.impl), maturity: adaptation}
+    status: supported
+
+  - id: ledger-mirror
+    component: ledger/mirror.py
+    purpose: Divergence between the decoder-implied and body-model-implied self-position; a monitor + probe trigger, never a loss.
+    hypothesis: A self-consistency monitor detects localisation failure (kidnapping) and speeds relocalisation.
+    evidence_for:
+      - docs/acceptance/stage-6a/kidnapped_report.md   # spike within 20 ticks in every env; relocalisation 18.3 (mirror) vs 34.3 (ablation)
+    evidence_against: []
+    confidence: 0.75
+    confidence_note: >
+      Clear positive: the spike criterion fires reliably and the mirror
+      responses roughly halve relocalisation time versus the monitor-only
+      ablation. Depends on a well-calibrated pose head (pose_scale, grad-steps).
+    success_criteria: spike < 20 ticks all seeds; mirror relocalisation < ablation. MET at acceptance scale.
+    failure_criteria: no spike, or mirror >= ablation relocalisation, at full scale across 5 seeds.
+    replacement_candidates:
+      - {name: keep (best-evidenced self-model component), maturity: established}
+    status: supported
+
+  - id: ledger-competence
+    component: ledger/competence.py
+    purpose: Per-region rolling self-assessment (wm loss, body Brier, forecaster NMSE) with adaptation-status flags.
+    hypothesis: A per-region competence tracker surfaces where the agent is degrading vs adapting.
+    evidence_for:
+      - docs/acceptance/stage-7a/competence_report.md   # tracks stable->degrading->recovery across seasonal shifts in 6 regions
+    evidence_against: []
+    confidence: 0.65
+    confidence_note: >
+      Works as a descriptive instrument (feeds proposals/researcher); its
+      flags are noisy per-region and their downstream value depends on the
+      proposal/researcher layers, which are themselves contested.
+    success_criteria: adaptation flags correlate with injected volatility/shifts.
+    failure_criteria: flags are pure noise vs the lever log.
+    replacement_candidates:
+      - {name: simpler global competence (drop per-region), maturity: adaptation}
+    status: supported
+
+  - id: selfq-unified
+    component: selfq/model.py, selfq/adapters.py
+    purpose: One conditional model replacing the body model + forecaster behind adapters (ledger.impl=selfq).
+    hypothesis: A single conditioned self-model matches or beats the separate heads while unifying the interface.
+    evidence_for:
+      - docs/acceptance/stage-E/parity.md    # body CE within 7%, Brier 2x better, stable across seeds
+      - docs/acceptance/stage-E/README.md
+    evidence_against:
+      - docs/acceptance/stage-E/parity.md    # forecaster NMSE ~1.6x the heads at smoke (shared base won by the frequent body task); full-scale parity pending
+    confidence: 0.6
+    confidence_note: >
+      Body parity is real; the forecaster gap is a documented shared-base
+      starvation and its full-scale resolution is running now. This is the
+      canonical contested-with-active-comparison entry (the ledger.impl seam).
+    success_criteria: matches heads on body CE/Brier AND forecaster NMSE(k=10) at full scale.
+    failure_criteria: forecaster NMSE stays materially worse at full scale -> keep separate heads (or fix update-budget balance).
+    replacement_candidates:
+      - {name: separate heads (ledger.impl=heads, the default), maturity: established}
+      - {name: balance wake/sleep update budgets on the shared base, maturity: adaptation}
+      - {name: larger shared base / per-task learning rates, maturity: adaptation}
+    status: contested
+
+  - id: gradient-isolation
+    component: tests/test_grad_isolation.py, all of ledger/ and selfq/
+    purpose: Every self-model head consumes h.detach(); its losses never reach the core.
+    hypothesis: Isolating self-model gradients keeps the world model honest and the self-model a genuine (non-self-fulfilling) predictor.
+    evidence_for:
+      - CLAUDE.md
+      - docs/safety_scope.md
+      - docs/acceptance/stage-E/README.md   # isolation extends verbatim to SelfQ through the real trainer
+    evidence_against: []
+    confidence: 0.95
+    confidence_note: >
+      A HARD RULE and safety invariant, structurally tested. Recorded for
+      completeness; NOT a replaceable hypothesis — failure_criteria never
+      authorise removal (constitutional boundary).
+    success_criteria: structural test stays green; self-model heads never move core params.
+    failure_criteria: "n/a — constitutional. A leak is a bug to fix, never a design to drop."
+    replacement_candidates:
+      - {name: "PROTECTED — no replacement candidates (hard rule)", maturity: established}
+    status: supported
+
+  # ------------------------------------------------------- meta-layers
+  - id: researcher-monitors
+    component: researcher/registry.py (cusum_frozen_baseline, mean_shift)
+    purpose: Sequential change detectors that drive hypotheses supported->weakening->contradicted.
+    hypothesis: A frozen-baseline CUSUM detects persistent capability change that the sliding mean_shift misses.
+    evidence_for:
+      - docs/acceptance/stage-B/README.md    # blind-spot lever caught by CUSUM in 3/3 seeds, mean_shift never escalates; zero pre-lever false alarms
+      - docs/acceptance/stage-8a/README.md   # lever drives supported->weakening->contradicted with correct timing
+    evidence_against:
+      - docs/acceptance/stage-B/README.md    # the researcher-value latency arm still censored 1/3 seeds (short-horizon)
+    confidence: 0.75
+    confidence_note: >
+      CUSUM demonstrably closes mean_shift's onset-only blind spot; the win
+      is a monitor-quality result, independent of whether the agenda it feeds
+      is valuable.
+    success_criteria: detects a blind-spot lever within budget, zero pre-lever false alarms. MET.
+    failure_criteria: misses persistent change or false-alarms pre-lever at full scale.
+    replacement_candidates:
+      - {name: mean_shift ablation (kept, config-selectable), maturity: established}
+      - {name: Bayesian online change-point detection, maturity: underexplored}
+    status: supported
+
+  - id: research-agenda-value
+    component: researcher/agenda.py, researcher/eig.py
+    purpose: A ranked agenda of experiments (value x tractability x novelty / cost, or EIG v2) the researcher recommends.
+    hypothesis: Following the ranked agenda reduces the agent's uncertainty faster than random or greedy selection.
+    evidence_for:
+      - docs/acceptance/stage-8b/README.md   # top items point at the lever-affected capability; deterministic ranking
+    evidence_against:
+      - experiments/results/20260708-2141/researcher_value/ANALYSIS.md   # NULL on every axis: no arm beats drift; EIG calibration rho -0.33 (no positive calibration)
+    confidence: 0.55
+    confidence_note: >
+      The agenda ranks sensibly and the noisy-TV guard holds, but its central
+      value claim is an honest null at smoke scale; EIG predicted_gain does
+      not yet track realised reduction.
+    success_criteria: agenda arm beats random/greedy on drift-corrected uncertainty reduction at full scale; EIG Spearman > 0.
+    failure_criteria: no separation at full scale -> the ranking adds no value over cheaper selection.
+    replacement_candidates:
+      - {name: v1 heuristic ranker (kept as ablation), maturity: established}
+      - {name: greedy raw-uncertainty (the control arm), maturity: established}
+    status: contested
+
+  - id: proposal-generators-dual-source
+    component: proposals/generator.py
+    purpose: Rule generators run on ledger evidence AND a logs-only control, feeding the blind-review queue.
+    hypothesis: Ledger-sourced proposals outperform logs-only-sourced ones on realised benefit and calibration.
+    evidence_for:
+      - docs/acceptance/stage-C/proposal_quality_v2_summary.md   # ledger arm produces evaluable knob proposals
+    evidence_against:
+      - experiments/results/20260708-1808/proposal_quality/ANALYSIS.md   # logs_only fired ZERO on healthy runs -> hypothesis NOT DECIDABLE; the one A/B hit a partly-mechanical (tautological) criterion
+    confidence: 0.5
+    confidence_note: >
+      The comparison exists and is honest, but there is no logs_only sample
+      to compare against on healthy runs; the ledger's advantage is
+      sensitivity, not yet demonstrated benefit.
+    success_criteria: ledger arm beats logs_only on realised benefit with both arms non-empty at full scale.
+    failure_criteria: logs_only stays empty or ledger shows no benefit edge -> the dual-source claim is undecidable/false.
+    replacement_candidates:
+      - {name: keep as an honest control (report the null), maturity: established}
+      - {name: adversarial/unhealthy-run battery to make logs_only speak, maturity: adaptation}
+    status: contested
+
+  - id: architect-instrument
+    component: architect/
+    purpose: Experimenter-side analysis + LLM drafting + self-critique that proposes (never applies) repository changes.
+    hypothesis: An LLM Architect localises injected flaws better than the deterministic rule generators.
+    evidence_for:
+      - docs/acceptance/stage-D/README.md   # pipeline runs end-to-end offline; constitution + citation gate work
+    evidence_against:
+      - docs/acceptance/stage-D/archbench.md   # OFFLINE the architect arm drafts nothing (empty column); the rules arm mislocalised poisoned_lr and false-positived on the clean control
+    confidence: 0.35
+    confidence_note: >
+      An instrument whose capability is UNMEASURED: offline it produces
+      nothing, and the online arm (needs ANTHROPIC_API_KEY, Stage Z) has not
+      run. archbench's control arm shows the bar to beat (symptom-without-cause).
+    success_criteria: online architect arm localises >= the rules arm across the flaw battery, with a low clean-control false-positive rate.
+    failure_criteria: online architect no better than rules (or worse false-positive rate) at smoke scale.
+    replacement_candidates:
+      - {name: rule generators only (the control arm), maturity: established}
+      - {name: retrieval-augmented drafting over the analysis report, maturity: underexplored}
+    status: untested
+
+  - id: training-procedure
+    component: training/ppo.py, training/sleep.py
+    purpose: Recurrent PPO (wake) plus the circadian imagination trainer.
+    hypothesis: This training procedure produces a competent policy at laptop scale.
+    evidence_for:
+      - experiments/results/20260708-1311/ANALYSIS.md   # reward climbs; reset-anticipation null confirmed; memory-reliability regime finding
+    evidence_against:
+      - experiments/results/20260708-1311/ANALYSIS.md   # six of eight battery tests below minimum viable scale at quick; convergence needs 50k-200k
+    confidence: 0.65
+    confidence_note: >
+      The procedure works but is compute-hungry relative to the laptop
+      budget; most evidence is smoke-scale machinery validation, not
+      architecture evidence (the MIN_VIABLE_SCALE contract makes this explicit).
+    success_criteria: full-scale battery produces evidence-stamped (not machinery-only) rows.
+    failure_criteria: cannot reach viable scale within the laptop budget -> procedure/efficiency is the bottleneck.
+    replacement_candidates:
+      - {name: plain PPO (drop circadian) where sleep shows no value, maturity: established}
+      - {name: smaller world / shorter episodes to reach viable scale cheaper, maturity: adaptation}
+    status: contested
+
+  # ------------------------------------------- untested placeholders (stages)
+  - id: hydration-degradation
+    component: world/engine.py, ledger/ (to be built in Stage W)
+    purpose: >
+      PLACEHOLDER for Stage W: fatigue/hydration degradation mechanics that
+      make capability state-dependent (a richer self-model target).
+    hypothesis: >
+      State-dependent capability degradation gives the body model / SelfQ a
+      non-trivial thing to predict and a reason for self-modelling to pay off.
+    evidence_for: []
+    evidence_against: []
+    confidence: 0.2
+    confidence_note: >
+      Untested placeholder. NOTE: the Stage-W specification was NOT included
+      in this engagement's directive (see docs/evolution_report.md, Gate P1).
+    success_criteria: (to be defined by the Stage-W spec) degradation is predictable and lever-labelled ground-truth only.
+    failure_criteria: degradation is unpredictable noise, or a self-model that ignores it does just as well.
+    replacement_candidates:
+      - {name: static capabilities (status quo), maturity: established}
+    status: untested
+
+  - id: multi-agent-attribution
+    component: world/engine.py (other-agent causes)
+    purpose: PLACEHOLDER for a multi-agent extension where another agent is a distinct cause class for attribution.
+    hypothesis: A second agent gives attribution a genuinely three-way (self/world/other) problem worth solving.
+    evidence_for: []
+    evidence_against:
+      - docs/safety_scope.md   # multi-agent is explicitly NOT a roadmap commitment today (the engine holds one agent)
+    confidence: 0.15
+    confidence_note: Untested placeholder; the current engine is single-agent by design. Spec not provided in the directive.
+    success_criteria: attribution distinguishes other-agent causes above chance.
+    failure_criteria: the other-agent class is indistinguishable from world.
+    replacement_candidates:
+      - {name: single-agent world (status quo), maturity: established}
+    status: untested
+
+  - id: causal-self-theory
+    component: (to be built in Stage T)
+    purpose: PLACEHOLDER for Stage T — an explicit causal model of the agent's own action->outcome structure.
+    hypothesis: >
+      An explicit, testable causal self-theory (interventional, not just
+      predictive) lets the agent reason about capability change it has not
+      yet observed.
+    evidence_for: []
+    evidence_against: []
+    confidence: 0.2
+    confidence_note: >
+      Untested placeholder. NOTE: the Stage-T specification was NOT included
+      in this engagement's directive (see docs/evolution_report.md, Gate P1).
+    success_criteria: (to be defined by the Stage-T spec) the causal theory makes interventional predictions that beat the body model's associative ones.
+    failure_criteria: the causal theory adds no predictive/interventional power over the associative body model.
+    replacement_candidates:
+      - {name: associative body model / SelfQ only (status quo), maturity: established}
+    status: untested
