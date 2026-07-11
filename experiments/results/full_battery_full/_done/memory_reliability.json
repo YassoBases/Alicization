@@ -1,0 +1,1 @@
+[{"test": "memory-reliability", "metric": "stale_trip_rate_per_1k", "ours": 38.31921355498721, "ours_ci95": 8.365060178880906, "control": 46.42742966751918, "control_ci95": 10.287387358068246, "delta": -8.10821611253197, "n": 5, "note": "lower is better; control = reliability-blind", "evidence_stamp": "evidence"}]

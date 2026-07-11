@@ -101,24 +101,25 @@ assumptions:
     component: ledger/reliability.py
     purpose: A learned P(memory still matches world) that reweights retrieval and drives an "inspect" plan.
     hypothesis: Down-weighting unreliable memories reduces stale trips to dead food locations.
-    evidence_for: []
+    evidence_for:
+      - experiments/results/full_battery_full/summary.md  # full scale (5 seeds, evidence-stamped): 38.3 vs 46.4 stale/1k — first DIRECTIONAL win for reliability, though CIs overlap
     evidence_against:
       - docs/acceptance/stage-5b/reliability_report.md    # stale-trip rate WITH reliability 87/1k WORSE than ablation 28/1k; decay curves do not differ by region
       - experiments/results/20260708-1311/ANALYSIS.md     # reconfirmed null at quick scale (29.3 vs 32.1, overlapping CIs)
-    confidence: 0.85
+    confidence: 0.6
     confidence_note: >
-      Two independent scales agree the weighting does not help and the fitted
-      curves are flat/indistinguishable; the model is a zero-init logistic
-      regression that barely moves. Confidence is in the NULL.
+      The removal case WEAKENED: two earlier results against, but the
+      full-scale run reverses direction (still overlapping CIs). Statistically
+      a null across all three; Stage W's slow-cache regime is the fair retest.
     success_criteria: stale-trip rate WITH reliability strictly below the ablation at full scale.
     failure_criteria: >
-      ALREADY MET (twice). This is the directive's first named removal
-      candidate: it becomes a proposal with predicted effect ~0, reviewed and
-      executed by the human.
+      Met twice at smoke/acceptance scale, but the full-scale run reversed
+      direction: the removal proposal is ON HOLD pending the Stage-W
+      slow-cache retest (caches create the regime where memory aging matters).
     replacement_candidates:
       - {name: REMOVE the reliability head + inspect drive, maturity: established}
       - {name: replace with a fixed age/volatility decay (no learned model), maturity: adaptation}
-    status: unsupported
+    status: contested
 
   # ------------------------------------------------------- consolidation
   - id: consolidation-imagination
@@ -129,6 +130,7 @@ assumptions:
       - docs/acceptance/stage-4c/forecaster_report.md   # the sleep machinery trains a forecaster that works
     evidence_against:
       - experiments/results/20260708-1311/ANALYSIS.md   # sleep-ablation directionally fine but statistically NULL at smoke (overlapping CIs; needs ~100 grad-steps/window)
+      - experiments/results/full_battery_full/summary.md   # THIRD null, now at full scale: wake-only slightly BETTER (-0.120 vs -0.144, overlapping CIs)
     confidence: 0.45
     confidence_note: >
       Wake+sleep ends slightly ahead of wake-only but CIs overlap at smoke
@@ -203,7 +205,8 @@ assumptions:
     purpose: Per-action success / dpos / Delta-energy predictions fed (detached) to the policy.
     hypothesis: An explicit body model gives the policy useful capability estimates and sharp self-prediction.
     evidence_for:
-      - docs/acceptance/stage-E/parity.md   # body CE/Brier are functional and stable at smoke scale (SelfQ matches/beats them)
+      - docs/acceptance/stage-E/parity.md   # body CE/Brier are functional and stable at smoke scale
+      - experiments/results/full_battery_full/summary.md   # FIRST A-vs-B data: detection latency 614 vs 1502 ticks (A ~2.4x faster, wide CIs, machinery-only stamp); recovery ratio no difference
     evidence_against:
       - experiments/results/20260708-1311/ANALYSIS.md   # capability-shift battery's use of the body-NLL detector was censored 18/18 at quick scale (undertrained baseline)
     confidence: 0.65
@@ -226,6 +229,7 @@ assumptions:
     evidence_against:
       - docs/acceptance/stage-A/scale_curves_fullscale/README.md   # BIMODAL and seed-fragile: 0.99 or 0.00 collapse at every budget incl. 200k; where it works it only MATCHES always-SELF (~0.99), never beats
       - experiments/results/20260708-1311/ANALYSIS.md              # 0.12 at quick scale (everything-anomalous early regime)
+      - experiments/results/full_battery_full/summary.md           # full battery (5 seeds): 0.81 +/- 0.31 vs always-SELF 0.94 — loses to the trivial baseline with huge variance
     confidence: 0.7
     confidence_note: >
       Confidence is in the finding that attribution, AS BUILT, does not
@@ -247,6 +251,7 @@ assumptions:
     evidence_for:
       - docs/acceptance/stage-4c/forecaster_report.md              # NMSE 0.78 < 1 at k=10, 50k steps
       - docs/acceptance/stage-A/scale_curves_fullscale/README.md   # crosses NMSE<1 between 63k-113k; ~0.5 at 200k, 3/3 seeds
+      - experiments/results/full_battery_full/summary.md           # k100 NMSE 0.10 (5 seeds, evidence-stamped): long-horizon intero drift is highly predictable
     evidence_against:
       - docs/acceptance/stage-E/parity.md   # k=1 NMSE is denominator-degenerate (identity MSE ~6e-5); non-functional below ~50k
     confidence: 0.75
@@ -300,22 +305,21 @@ assumptions:
     purpose: One conditional model replacing the body model + forecaster behind adapters (ledger.impl=selfq).
     hypothesis: A single conditioned self-model matches or beats the separate heads while unifying the interface.
     evidence_for:
-      - docs/acceptance/stage-E/parity.md    # body CE within 7%, Brier 2x better, stable across seeds
-      - docs/acceptance/stage-E/README.md
+      - docs/acceptance/stage-E/parity.md    # smoke scale only: body CE within 7%, Brier 2x better
     evidence_against:
-      - docs/acceptance/stage-E/parity.md    # forecaster NMSE ~1.6x the heads at smoke (shared base won by the frequent body task); full-scale parity pending
-    confidence: 0.6
+      - docs/acceptance/stage-E/full/parity.md   # FULL SCALE (200k, 3 seeds): body CE 2.0x worse, Brier 2.6x worse, forecaster NMSE ~4x worse than separate heads
+      - docs/acceptance/stage-E/full/README.md   # verdict: the smoke-scale win did not survive scale; shared-base competition compounds
+    confidence: 0.8
     confidence_note: >
-      Body parity is real; the forecaster gap is a documented shared-base
-      starvation and its full-scale resolution is running now. This is the
-      canonical contested-with-active-comparison entry (the ledger.impl seam).
-    success_criteria: matches heads on body CE/Brier AND forecaster NMSE(k=10) at full scale.
-    failure_criteria: forecaster NMSE stays materially worse at full scale -> keep separate heads (or fix update-budget balance).
+      Confidence is in the NEGATIVE: the completed full-scale comparison shows
+      separate heads decisively better on every metric; the smoke-scale body
+      win was a small-budget artifact.
+    success_criteria: matches heads on body CE/Brier AND forecaster NMSE(k=10) at full scale. NOT MET (failed all).
+    failure_criteria: MET at full scale -> ledger.impl=heads stands; SelfQ remains the losing arm of a completed comparison.
     replacement_candidates:
-      - {name: separate heads (ledger.impl=heads, the default), maturity: established}
-      - {name: balance wake/sleep update budgets on the shared base, maturity: adaptation}
-      - {name: larger shared base / per-task learning rates, maturity: adaptation}
-    status: contested
+      - {name: separate heads (ledger.impl=heads, the default) — the winner, maturity: established}
+      - {name: separate towers behind one query API (Phase-3 list, not funded), maturity: underexplored}
+    status: unsupported
 
   - id: gradient-isolation
     component: tests/test_grad_isolation.py, all of ledger/ and selfq/

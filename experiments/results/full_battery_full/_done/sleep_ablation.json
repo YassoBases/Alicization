@@ -1,0 +1,1 @@
+[{"test": "sleep-ablation", "metric": "final_reward", "ours": -0.14360806094482542, "ours_ci95": 0.018832558085531505, "control": -0.11974823489020181, "control_ci95": 0.017076118966832175, "delta": -0.023859826054623612, "n": 5, "note": "control = wake-only (no consolidation)", "evidence_stamp": "machinery-only"}]

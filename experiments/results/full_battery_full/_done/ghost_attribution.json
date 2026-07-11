@@ -1,0 +1,1 @@
+[{"test": "ghost-attribution", "metric": "accuracy", "ours": 0.8096153846153846, "ours_ci95": 0.31385573342037887, "control": 0.9377303685897436, "control_ci95": 0.022494987902991804, "delta": -0.12811498397435894, "n": 5, "note": "control = always-SELF majority", "evidence_stamp": "machinery-only"}]

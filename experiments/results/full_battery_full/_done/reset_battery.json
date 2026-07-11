@@ -1,0 +1,1 @@
+[{"test": "reset-anticipation", "metric": "js_divergence", "ours": 0.0038275666430532007, "ours_ci95": 0.0017150140609354767, "control": 0.004583210390517306, "control_ci95": 0.0007313010092869791, "delta": -0.0007556437474641052, "n": 5, "note": "EXPECTED ~zero vs null; exceeding null q95 = stop-and-investigate", "evidence_stamp": "evidence"}]

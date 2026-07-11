@@ -1,0 +1,12 @@
+test,metric,ours,ours_ci95,control,control_ci95,delta,n,note,evidence_stamp
+capability-shift(rssm),detection_latency_ticks,614.4,453.5707407847202,1501.8666666666666,1442.5400887514738,-887.4666666666666,15,"A=ledger->policy, B=withheld",machinery-only
+capability-shift(rssm),performance_recovery_ratio,0.36016865427448713,0.14594488428166466,0.34674582749849897,0.1704306853193585,0.013422826775988161,15,"A=ledger->policy, B=withheld",machinery-only
+ghost-attribution,accuracy,0.8096153846153846,0.31385573342037887,0.9377303685897436,0.022494987902991804,-0.12811498397435894,5,control = always-SELF majority,machinery-only
+memory-reliability,stale_trip_rate_per_1k,38.31921355498721,8.365060178880906,46.42742966751918,10.287387358068246,-8.10821611253197,5,lower is better; control = reliability-blind,evidence
+forecaster-nmse,nmse_k1,28.390656207301426,12.791711237058696,1.0,0.0,27.390656207301426,5,control = identity predictor (NMSE 1.0),evidence
+forecaster-nmse,nmse_k10,1.8726997836352794,0.5015566685363394,1.0,0.0,0.8726997836352794,5,control = identity predictor (NMSE 1.0),evidence
+forecaster-nmse,nmse_k100,0.10310589504522553,0.02376533716732147,1.0,0.0,-0.8968941049547745,5,control = identity predictor (NMSE 1.0),evidence
+kidnapped_agent,ERROR,nan,nan,nan,nan,nan,0,"PermissionError(13, 'Access is denied')",evidence
+seasonal_shift,ERROR,nan,nan,nan,nan,nan,0,"PermissionError(13, 'Access is denied')",machinery-only
+sleep-ablation,final_reward,-0.14360806094482542,0.018832558085531505,-0.11974823489020181,0.017076118966832175,-0.023859826054623612,5,control = wake-only (no consolidation),machinery-only
+reset-anticipation,js_divergence,0.0038275666430532007,0.0017150140609354767,0.004583210390517306,0.0007313010092869791,-0.0007556437474641052,5,EXPECTED ~zero vs null; exceeding null q95 = stop-and-investigate,evidence

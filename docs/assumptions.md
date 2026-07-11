@@ -14,7 +14,7 @@ Auto-generated from `lab/assumptions.yaml` by `python -m lab.render` — do not 
 | [recurrent-core](#recurrent-core) | `agent/core_rssm.py, agent/core_gru.py` | **supported** | 0.7 |
 | [latent-representation](#latent-representation) | `agent/core_rssm.py (deter+stoch split)` | **untested** | 0.4 |
 | [episodic-memory](#episodic-memory) | `memory/episodic.py` | **contested** | 0.4 |
-| [memory-reliability-weighting](#memory-reliability-weighting) | `ledger/reliability.py` | **unsupported** | 0.85 |
+| [memory-reliability-weighting](#memory-reliability-weighting) | `ledger/reliability.py` | **contested** | 0.6 |
 | [consolidation-imagination](#consolidation-imagination) | `training/sleep.py (Dreamer-style imagination in sleep)` | **contested** | 0.45 |
 | [wake-sleep-scheduling](#wake-sleep-scheduling) | `training/sleep.py (is_sleep_tick)` | **untested** | 0.6 |
 | [drives-intrinsic](#drives-intrinsic) | `agent/drives.py, training/reward.py` | **untested** | 0.5 |
@@ -24,7 +24,7 @@ Auto-generated from `lab/assumptions.yaml` by `python -m lab.render` — do not 
 | [ledger-forecaster](#ledger-forecaster) | `ledger/forecaster.py` | **supported** | 0.75 |
 | [ledger-mirror](#ledger-mirror) | `ledger/mirror.py` | **supported** | 0.75 |
 | [ledger-competence](#ledger-competence) | `ledger/competence.py` | **supported** | 0.65 |
-| [selfq-unified](#selfq-unified) | `selfq/model.py, selfq/adapters.py` | **contested** | 0.6 |
+| [selfq-unified](#selfq-unified) | `selfq/model.py, selfq/adapters.py` | **unsupported** | 0.8 |
 | [gradient-isolation](#gradient-isolation) | `tests/test_grad_isolation.py, all of ledger/ and selfq/` | **supported** | 0.95 |
 | [researcher-monitors](#researcher-monitors) | `researcher/registry.py (cusum_frozen_baseline, mean_shift)` | **supported** | 0.75 |
 | [research-agenda-value](#research-agenda-value) | `researcher/agenda.py, researcher/eig.py` | **contested** | 0.55 |
@@ -74,12 +74,12 @@ Auto-generated from `lab/assumptions.yaml` by `python -m lab.render` — do not 
 ## memory-reliability-weighting
 
 - **component**: `ledger/reliability.py`
-- **status**: unsupported  |  **confidence**: 0.85 — Two independent scales agree the weighting does not help and the fitted curves are flat/indistinguishable; the model is a zero-init logistic regression that barely moves. Confidence is in the NULL.
+- **status**: contested  |  **confidence**: 0.6 — The removal case WEAKENED: two earlier results against, but the full-scale run reverses direction (still overlapping CIs). Statistically a null across all three; Stage W's slow-cache regime is the fair retest.
 - **purpose**: A learned P(memory still matches world) that reweights retrieval and drives an "inspect" plan.
 - **hypothesis**: Down-weighting unreliable memories reduces stale trips to dead food locations.
 - **success**: stale-trip rate WITH reliability strictly below the ablation at full scale.
-- **failure (replace/remove when)**: ALREADY MET (twice). This is the directive's first named removal candidate: it becomes a proposal with predicted effect ~0, reviewed and executed by the human.
-- **evidence for**: _none_
+- **failure (replace/remove when)**: Met twice at smoke/acceptance scale, but the full-scale run reversed direction: the removal proposal is ON HOLD pending the Stage-W slow-cache retest (caches create the regime where memory aging matters).
+- **evidence for**: `experiments/results/full_battery_full/summary.md`
 - **evidence against**: `docs/acceptance/stage-5b/reliability_report.md`, `experiments/results/20260708-1311/ANALYSIS.md`
 - **replacement candidates**: REMOVE the reliability head + inspect drive (established), replace with a fixed age/volatility decay (no learned model) (adaptation)
 
@@ -92,7 +92,7 @@ Auto-generated from `lab/assumptions.yaml` by `python -m lab.render` — do not 
 - **success**: wake+sleep final reward beats wake-only with non-overlapping CI at full scale.
 - **failure (replace/remove when)**: no separation at full scale -> imagination is not earning its compute.
 - **evidence for**: `docs/acceptance/stage-4c/forecaster_report.md`
-- **evidence against**: `experiments/results/20260708-1311/ANALYSIS.md`
+- **evidence against**: `experiments/results/20260708-1311/ANALYSIS.md`, `experiments/results/full_battery_full/summary.md`
 - **replacement candidates**: wake-only PPO (drop imagination) (established), replay-only consolidation (no imagined rollouts) (adaptation)
 
 ## wake-sleep-scheduling
@@ -139,7 +139,7 @@ Auto-generated from `lab/assumptions.yaml` by `python -m lab.render` — do not 
 - **hypothesis**: An explicit body model gives the policy useful capability estimates and sharp self-prediction.
 - **success**: architecture A (ledger features on) beats B (withheld) on detection/recovery at full scale.
 - **failure (replace/remove when)**: A == B at full scale -> the body features do not help the policy (keep head for evaluation, drop from policy input).
-- **evidence for**: `docs/acceptance/stage-E/parity.md`
+- **evidence for**: `docs/acceptance/stage-E/parity.md`, `experiments/results/full_battery_full/summary.md`
 - **evidence against**: `experiments/results/20260708-1311/ANALYSIS.md`
 - **replacement candidates**: use_ledger_features=false (already the B control) (established), fold into SelfQ (already available) (adaptation)
 
@@ -152,7 +152,7 @@ Auto-generated from `lab/assumptions.yaml` by `python -m lab.render` — do not 
 - **success**: accuracy beats the always-SELF majority by a stable margin across all seeds.
 - **failure (replace/remove when)**: ALREADY MET (seed-fragile, no margin) -> redesign (SelfQ-residual reframing, TODO.md) or remove from the policy path.
 - **evidence for**: `docs/acceptance/stage-A/scale_curves_fullscale/README.md`
-- **evidence against**: `docs/acceptance/stage-A/scale_curves_fullscale/README.md`, `experiments/results/20260708-1311/ANALYSIS.md`
+- **evidence against**: `docs/acceptance/stage-A/scale_curves_fullscale/README.md`, `experiments/results/20260708-1311/ANALYSIS.md`, `experiments/results/full_battery_full/summary.md`
 - **replacement candidates**: SelfQ-residual attribution (deferred spec (adaptation), class-balanced / focal loss + threshold calibration (established), REMOVE (keep only as an evaluation probe) (established)
 
 ## ledger-forecaster
@@ -163,7 +163,7 @@ Auto-generated from `lab/assumptions.yaml` by `python -m lab.render` — do not 
 - **hypothesis**: The agent can predict its own future interoceptive state better than "nothing changes".
 - **success**: NMSE(k=10) < 1 across seeds at full scale. MET.
 - **failure (replace/remove when)**: regresses above identity at full scale.
-- **evidence for**: `docs/acceptance/stage-4c/forecaster_report.md`, `docs/acceptance/stage-A/scale_curves_fullscale/README.md`
+- **evidence for**: `docs/acceptance/stage-4c/forecaster_report.md`, `docs/acceptance/stage-A/scale_curves_fullscale/README.md`, `experiments/results/full_battery_full/summary.md`
 - **evidence against**: `docs/acceptance/stage-E/parity.md`
 - **replacement candidates**: fold into SelfQ (contested via ledger.impl) (adaptation)
 
@@ -194,14 +194,14 @@ Auto-generated from `lab/assumptions.yaml` by `python -m lab.render` — do not 
 ## selfq-unified
 
 - **component**: `selfq/model.py, selfq/adapters.py`
-- **status**: contested  |  **confidence**: 0.6 — Body parity is real; the forecaster gap is a documented shared-base starvation and its full-scale resolution is running now. This is the canonical contested-with-active-comparison entry (the ledger.impl seam).
+- **status**: unsupported  |  **confidence**: 0.8 — Confidence is in the NEGATIVE: the completed full-scale comparison shows separate heads decisively better on every metric; the smoke-scale body win was a small-budget artifact.
 - **purpose**: One conditional model replacing the body model + forecaster behind adapters (ledger.impl=selfq).
 - **hypothesis**: A single conditioned self-model matches or beats the separate heads while unifying the interface.
-- **success**: matches heads on body CE/Brier AND forecaster NMSE(k=10) at full scale.
-- **failure (replace/remove when)**: forecaster NMSE stays materially worse at full scale -> keep separate heads (or fix update-budget balance).
-- **evidence for**: `docs/acceptance/stage-E/parity.md`, `docs/acceptance/stage-E/README.md`
-- **evidence against**: `docs/acceptance/stage-E/parity.md`
-- **replacement candidates**: separate heads (ledger.impl=heads (established), balance wake/sleep update budgets on the shared base (adaptation), larger shared base / per-task learning rates (adaptation)
+- **success**: matches heads on body CE/Brier AND forecaster NMSE(k=10) at full scale. NOT MET (failed all).
+- **failure (replace/remove when)**: MET at full scale -> ledger.impl=heads stands; SelfQ remains the losing arm of a completed comparison.
+- **evidence for**: `docs/acceptance/stage-E/parity.md`
+- **evidence against**: `docs/acceptance/stage-E/full/parity.md`, `docs/acceptance/stage-E/full/README.md`
+- **replacement candidates**: separate heads (ledger.impl=heads (established), separate towers behind one query API (Phase-3 list (underexplored)
 
 ## gradient-isolation
 
